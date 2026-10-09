@@ -191,7 +191,7 @@ module.exports = async (req, res) => {
       fullTextToScan = messageBody;
     }
 
-    // Lakukan Scan Teks
+    // Jalankan Pemindaian Teks
     scanIncomingText(fullTextToScan);
 
     // Format dan Kirim Pesan Langsung ke Telegram
@@ -204,7 +204,6 @@ module.exports = async (req, res) => {
       formattedMessage = `Username: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\n${messageBody}`;
     }
 
-    // Mengirimkan Notifikasi ke Telegram
     await sendTelegramMessage(CONFIG.CHAT_ID, formattedMessage);
 
     return res.status(200).json({ success: true, status: 'scanned_and_delivered' });
@@ -214,6 +213,3 @@ module.exports = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
-) {
-  scanIncomingText(text);
-}
