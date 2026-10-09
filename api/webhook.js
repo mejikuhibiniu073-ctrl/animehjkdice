@@ -7,7 +7,7 @@ module.exports = async (req, res) => {
 
   try {
     const BOT_TOKEN = process.env.BOT_TOKEN;
-    const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
+    const TELEGRAM_API = `https://api.telegram.org/bot${8867286519:AAFCsH9InhDdTAolaDDn-dU4-zvAOPdLGSQ}`;
     const { message } = req.body;
 
     if (message && message.text) {
