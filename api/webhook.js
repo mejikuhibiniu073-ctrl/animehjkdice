@@ -1,19 +1,9 @@
-const axios = require('axios');
-
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   CHAT_ID: '1315912406',
-  TELEGRAM_BASE_URL: 'https://api.telegram.org/bot'
-};
-
-const stats = {
-  totalLaporan: 0,
-  unitMasukTas: 0,
-  towerSelesai: 0,
-  totalGems: 0,
-  totalTraitReroll: 0,
-  unitsReceived: [],
-  potions: {}
+  TELEGRAM_BASE_URL: 'https://api.telegram.org/bot',
+  REDIS_URL: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
+  REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
 };
 
 function getCurrentTimeWIB() {
@@ -28,9 +18,29 @@ function getCurrentTimeWIB() {
   });
 }
 
-function scanIncomingText(text) {
+// Helper untuk berinteraksi dengan Upstash Redis API
+async function redisCmd(command, ...args) {
+  if (!CONFIG.REDIS_URL || !CONFIG.REDIS_TOKEN) return null;
+  try {
+    const res = await fetch(`${CONFIG.REDIS_URL}/${command}/${args.map(encodeURIComponent).join('/')}`, {
+      headers: { Authorization: `Bearer ${CONFIG.REDIS_TOKEN}` }
+    });
+    const data = await res.json();
+    return data.result;
+  } catch (e) {
+    console.error('Redis error:', e);
+    return null;
+  }
+}
+
+// Fungsi scanning data dan akumulasi ke Upstash Redis
+async function scanAndAccumulate(text) {
+  if (!text) return;
+
+  await redisCmd('incrby', 'stats:totalLaporan', 1);
+
   if (text.includes('New Unit!')) {
-    stats.unitMasukTas += 1;
+    await redisCmd('incrby', 'stats:unitMasukTas', 1);
     const nameMatch = text.match(/Name:\s*([^\r\n]+)/i);
     const mutationMatch = text.match(/Mutation:\s*([^\r\n]+)/i);
     const rarityMatch = text.match(/Rarity:\s*([^\r\n]+)/i);
@@ -39,38 +49,39 @@ function scanIncomingText(text) {
       let unitInfo = nameMatch[1].trim();
       if (mutationMatch) unitInfo += ` (${mutationMatch[1].trim()})`;
       if (rarityMatch) unitInfo += ` [${rarityMatch[1].trim()}]`;
-      stats.unitsReceived.push(unitInfo);
+      await redisCmd('rpush', 'stats:unitsReceived', unitInfo);
     }
   }
 
   if (text.includes('Tower Completed!')) {
-    stats.towerSelesai += 1;
+    await redisCmd('incrby', 'stats:towerSelesai', 1);
   }
 
   const gemsMatch = text.match(/Gems:\s*x?(\d+)/i);
   if (gemsMatch) {
-    stats.totalGems += parseInt(gemsMatch[1]);
+    await redisCmd('incrby', 'stats:totalGems', parseInt(gemsMatch[1], 10));
   }
 
   const traitMatch = text.match(/Trait Reroll:\s*x?(\d+)/i);
   if (traitMatch) {
-    stats.totalTraitReroll += parseInt(traitMatch[1]);
+    await redisCmd('incrby', 'stats:totalTraitReroll', parseInt(traitMatch[1], 10));
   }
 
-  const itemMatches = text.matchAll(/([A-Za-z0-9'\s]+):\s*x(\d+)/g);
-  for (const match of itemMatches) {
-    const itemName = match[1].trim();
-    const qty = parseInt(match[2]);
-
-    if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached'].includes(itemName)) {
-      stats.potions[itemName] = (stats.potions[itemName] || 0) + qty;
+  const lines = text.split('\n');
+  for (const line of lines) {
+    const itemMatch = line.match(/([A-Za-z0-9'\s]+):\s*x(\d+)/);
+    if (itemMatch) {
+      const itemName = itemMatch[1].trim();
+      const qty = parseInt(itemMatch[2], 10);
+      if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached'].includes(itemName)) {
+        await redisCmd('hincrby', 'stats:potions', itemName, qty);
+      }
     }
   }
 }
 
 function parseDiscordEmbed(embed) {
   const parts = [];
-
   if (embed.title) parts.push(`*${embed.title}*`);
   if (embed.description) parts.push(embed.description);
 
@@ -80,29 +91,32 @@ function parseDiscordEmbed(embed) {
       .join('\n\n');
     parts.push(fieldsText);
   }
-
   return parts.join('\n\n');
 }
 
-async function sendTelegramMessage(chatId, text, parseMode = 'Markdown') {
+async function sendTelegramMessage(chatId, text) {
   const url = `${CONFIG.TELEGRAM_BASE_URL}${CONFIG.BOT_TOKEN}/sendMessage`;
   try {
-    await axios.post(url, {
-      chat_id: chatId,
-      text: text,
-      parse_mode: parseMode,
-      disable_web_page_preview: true
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: text,
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
+      })
     });
-  } catch (error) {
-    if (parseMode === 'Markdown') {
-      await axios.post(url, {
+  } catch (err) {
+    await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         chat_id: chatId,
         text: text,
         disable_web_page_preview: true
-      });
-    } else {
-      throw error;
-    }
+      })
+    });
   }
 }
 
@@ -122,8 +136,8 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 1. Handling Command Telegram /stats
-    if (payload?.message) {
+    // 1. Respon Perintah dari Telegram (/stats)
+    if (payload && payload.message) {
       const chatId = payload.message.chat.id;
       const userText = (payload.message.text || '').toLowerCase();
 
@@ -133,29 +147,37 @@ module.exports = async (req, res) => {
       }
 
       if (userText === '/stats') {
+        const totalLaporan = (await redisCmd('get', 'stats:totalLaporan')) || 0;
+        const unitMasukTas = (await redisCmd('get', 'stats:unitMasukTas')) || 0;
+        const towerSelesai = (await redisCmd('get', 'stats:towerSelesai')) || 0;
+        const totalGems = (await redisCmd('get', 'stats:totalGems')) || 0;
+        const totalTraitReroll = (await redisCmd('get', 'stats:totalTraitReroll')) || 0;
+        const unitsReceived = (await redisCmd('lrange', 'stats:unitsReceived', 0, -1)) || [];
+        const potionsObj = (await redisCmd('hgetall', 'stats:potions')) || {};
+
         let itemList = 'Belum ada';
-        if (Object.keys(stats.potions).length > 0) {
-          itemList = Object.entries(stats.potions)
+        if (potionsObj && typeof potionsObj === 'object' && Object.keys(potionsObj).length > 0) {
+          itemList = Object.entries(potionsObj)
             .map(([name, qty]) => `  • ${name}: x${qty}`)
             .join('\n');
         }
 
         let unitList = 'Belum ada';
-        if (stats.unitsReceived.length > 0) {
-          unitList = stats.unitsReceived
+        if (Array.isArray(unitsReceived) && unitsReceived.length > 0) {
+          unitList = unitsReceived
             .map(u => `  • ${u}`)
             .join('\n');
         }
 
-        const reportText = `*Hasil Akumulasi Scanning Bot*\n` +
+        const reportText = `*Hasil Akumulasi Scanning Bot (Database)*\n` +
           `Waktu Cetak: ${getCurrentTimeWIB()}\n────────────────\n` +
-          `• Total Laporan Diproses: *${stats.totalLaporan}*\n` +
-          `• Unit Masuk Tas: *${stats.unitMasukTas}*\n` +
-          `• Tower Selesai: *${stats.towerSelesai}*\n\n` +
+          `• Total Laporan Diproses: *${totalLaporan}*\n` +
+          `• Unit Masuk Tas: *${unitMasukTas}*\n` +
+          `• Tower Selesai: *${towerSelesai}*\n\n` +
           `*Daftar Unit Diterima:*\n${unitList}\n\n` +
           `*Total Drops:*\n` +
-          `  • Total Gems: *x${stats.totalGems}*\n` +
-          `  • Total Trait Reroll: *x${stats.totalTraitReroll}*\n\n` +
+          `  • Total Gems: *x${totalGems}*\n` +
+          `  • Total Trait Reroll: *x${totalTraitReroll}*\n\n` +
           `*Item / Potion Diterima:*\n${itemList}`;
 
         await sendTelegramMessage(chatId, reportText);
@@ -170,8 +192,6 @@ module.exports = async (req, res) => {
     const senderName = payload?.username || 'Roblox Script';
     const timeWIB = getCurrentTimeWIB();
     const eventType = payload?.event_type || 'normal';
-
-    stats.totalLaporan += 1;
 
     let fullTextToScan = '';
     let messageBody = '';
@@ -191,10 +211,10 @@ module.exports = async (req, res) => {
       fullTextToScan = messageBody;
     }
 
-    // Jalankan Pemindaian Teks
-    scanIncomingText(fullTextToScan);
+    // Simpan & Akumulasi ke Upstash Redis
+    await scanAndAccumulate(fullTextToScan);
 
-    // Format dan Kirim Pesan Langsung ke Telegram
+    // Format & Kirim Notifikasi Real-time ke Telegram
     let formattedMessage = '';
     if (eventType === 'error') {
       formattedMessage = `*[ERROR LOG]*\nUsername: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\n${payload?.error_message || 'Error pada script.'}`;
@@ -206,7 +226,7 @@ module.exports = async (req, res) => {
 
     await sendTelegramMessage(CONFIG.CHAT_ID, formattedMessage);
 
-    return res.status(200).json({ success: true, status: 'scanned_and_delivered' });
+    return res.status(200).json({ success: true, status: 'scanned_and_saved' });
 
   } catch (error) {
     console.error('[Webhook Error]:', error.message);
