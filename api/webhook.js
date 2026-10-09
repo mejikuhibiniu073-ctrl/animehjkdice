@@ -6,16 +6,15 @@ const CONFIG = {
   TELEGRAM_BASE_URL: 'https://api.telegram.org/bot'
 };
 
-// Penampung statistik hasil scanning laporan Roblox
+// Penampung Akumulasi Statistik
 const stats = {
   totalLaporan: 0,
   unitMasukTas: 0,
   towerSelesai: 0,
-  rareHighestCount: 0,
-  highestRareName: 'Belum Ada',
   totalGems: 0,
   totalTraitReroll: 0,
-  potions: {}
+  unitsReceived: [], // Menyimpan daftar unit
+  potions: {}        // Menyimpan item/potion
 };
 
 function getCurrentTimeWIB() {
@@ -30,46 +29,50 @@ function getCurrentTimeWIB() {
   });
 }
 
-// Proses scanning & ekstraksi data mentah dari Roblox
-function scanAndProcessData(embed) {
-  const fullText = JSON.stringify(embed);
-
-  // Scan Unit Masuk Tas
-  if (embed.title && (embed.title.includes('New Unit') || embed.title.includes('Unit Received'))) {
+// Fungsi Scanning dan Parsing Teks Laporan
+function scanIncomingText(text) {
+  // 1. Scan Unit Baru Masuk Tas
+  if (text.includes('New Unit!')) {
     stats.unitMasukTas += 1;
+    const nameMatch = text.match(/Name:\s*([^\r\n]+)/i);
+    const mutationMatch = text.match(/Mutation:\s*([^\r\n]+)/i);
+    const rarityMatch = text.match(/Rarity:\s*([^\r\n]+)/i);
+
+    if (nameMatch) {
+      let unitInfo = nameMatch[1].trim();
+      if (mutationMatch) unitInfo += ` (${mutationMatch[1].trim()})`;
+      if (rarityMatch) unitInfo += ` [${rarityMatch[1].trim()}]`;
+      stats.unitsReceived.push(unitInfo);
+    }
   }
 
-  // Scan Tower Selesai
-  if (embed.title && embed.title.includes('Tower Completed')) {
+  // 2. Scan Tower Completed
+  if (text.includes('Tower Completed!')) {
     stats.towerSelesai += 1;
   }
 
-  // Scan Rare Tinggi (Secret / Mythic / Monarch)
-  if (fullText.includes('Secret') || fullText.includes('Monarch') || fullText.includes('Mythic')) {
-    stats.rareHighestCount += 1;
-    if (fullText.includes('Secret')) stats.highestRareName = 'Secret';
-    else if (fullText.includes('Monarch')) stats.highestRareName = 'Monarch';
-    else stats.highestRareName = 'Mythic';
+  // 3. Scan Gems
+  const gemsMatch = text.match(/Gems:\s*x?(\d+)/i);
+  if (gemsMatch) {
+    stats.totalGems += parseInt(gemsMatch[1]);
   }
 
-  // Scan Drops (Gems, Trait Reroll, Potions)
-  if (Array.isArray(embed.fields)) {
-    embed.fields.forEach(field => {
-      const val = field.value || '';
-      
-      const gemsMatch = val.match(/Gems:\s*x?(\d+)/i);
-      if (gemsMatch) stats.totalGems += parseInt(gemsMatch[1]);
+  // 4. Scan Trait Reroll
+  const traitMatch = text.match(/Trait Reroll:\s*x?(\d+)/i);
+  if (traitMatch) {
+    stats.totalTraitReroll += parseInt(traitMatch[1]);
+  }
 
-      const traitMatch = val.match(/Trait Reroll:\s*x?(\d+)/i);
-      if (traitMatch) stats.totalTraitReroll += parseInt(traitMatch[1]);
+  // 5. Scan Drops Potion & Item Lainnya (Misal: Shadow Income, Jinwoo's Daggers)
+  const itemMatches = text.matchAll(/([A-Za-z0-9'\s]+):\s*x(\d+)/g);
+  for (const match of itemMatches) {
+    const itemName = match[1].trim();
+    const qty = parseInt(match[2]);
 
-      const potionMatches = val.matchAll(/([A-Za-z\s]+(?:Speed|Income|Luck|Potion)[A-Za-z\s]*):\s*x?(\d+)/gi);
-      for (const match of potionMatches) {
-        const item = match[1].trim();
-        const qty = parseInt(match[2]);
-        stats.potions[item] = (stats.potions[item] || 0) + qty;
-      }
-    });
+    // Hindari memasukkan Gems dan Trait Reroll ke daftar item umum
+    if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached'].includes(itemName)) {
+      stats.potions[itemName] = (stats.potions[itemName] || 0) + qty;
+    }
   }
 }
 
@@ -111,7 +114,7 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 1. RESPON PERINTAH DARI TELEGRAM
+    // 1. Handling Command /stats dari Telegram
     if (payload?.message) {
       const chatId = payload.message.chat.id;
       const userText = (payload.message.text || '').toLowerCase();
@@ -121,24 +124,31 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true });
       }
 
-      // Saat pengguna meminta laporan /stats
       if (userText === '/stats') {
-        let potionList = 'Belum ada';
+        let itemList = 'Belum ada';
         if (Object.keys(stats.potions).length > 0) {
-          potionList = Object.entries(stats.potions)
+          itemList = Object.entries(stats.potions)
             .map(([name, qty]) => `  • ${name}: x${qty}`)
             .join('\n');
         }
 
-        const reportText = `*Hasil Scanning Laporan Bot*\n` +
+        let unitList = 'Belum ada';
+        if (stats.unitsReceived.length > 0) {
+          unitList = stats.unitsReceived
+            .map(u => `  • ${u}`)
+            .join('\n');
+        }
+
+        const reportText = `*Hasil Akumulasi Scanning Bot*\n` +
           `Waktu Cetak: ${getCurrentTimeWIB()}\n────────────────\n` +
           `• Total Laporan Diproses: *${stats.totalLaporan}*\n` +
           `• Unit Masuk Tas: *${stats.unitMasukTas}*\n` +
-          `• Tower Selesai: *${stats.towerSelesai}*\n` +
-          `• Total Unit Rare Tinggi (${stats.highestRareName}): *${stats.rareHighestCount}*\n` +
-          `• Total Gems Terkumpul: *${stats.totalGems}*\n` +
-          `• Total Trait Reroll: *${stats.totalTraitReroll}*\n` +
-          `• Potion/Buff Diterima:\n${potionList}`;
+          `• Tower Selesai: *${stats.towerSelesai}*\n\n` +
+          `*Daftar Unit Diterima:*\n${unitList}\n\n` +
+          `*Total Drops:*\n` +
+          `  • Total Gems: *x${stats.totalGems}*\n` +
+          `  • Total Trait Reroll: *x${stats.totalTraitReroll}*\n\n` +
+          `*Item / Potion Diterima:*\n${itemList}`;
 
         await sendTelegramMessage(chatId, reportText);
         return res.status(200).json({ success: true });
@@ -148,33 +158,36 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true });
     }
 
-    // 2. PROSES SCANNING LAPORAN DARI ROBLOX (TANPA LANGSUNG DIKIRIM KE TELEGRAM)
-    const eventType = payload?.event_type || 'normal';
-
-    // Jika pesan bertipe error atau disconnect, bot tetap langsung memberi notifikasi darurat
-    if (eventType === 'error' || eventType === 'disconnect') {
-      const senderName = payload?.username || 'Roblox Script';
-      const timeWIB = getCurrentTimeWIB();
-      const alertMsg = eventType === 'error'
-        ? `*[ERROR LOG]*\nUsername: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\n${payload?.error_message || 'Error pada script.'}`
-        : `*[DISCONNECT ALERT]*\nUsername: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\nScript terputus dari server!`;
-
-      await sendTelegramMessage(CONFIG.CHAT_ID, alertMsg);
-      return res.status(200).json({ success: true, processed: 'emergency_alert_sent' });
-    }
-
-    // Laporan normal: Diproses & dipindai saja
+    // 2. Handling & Pemindaian Pesan Masuk dari Roblox
     stats.totalLaporan += 1;
 
+    let fullTextToScan = '';
+
+    // Ambil seluruh teks baik dari Embed Discord atau Plain Content
     if (Array.isArray(payload?.embeds) && payload.embeds.length > 0) {
-      scanAndProcessData(payload.embeds[0]);
+      const embed = payload.embeds[0];
+      fullTextToScan += `${embed.title || ''}\n${embed.description || ''}\n`;
+      if (Array.isArray(embed.fields)) {
+        embed.fields.forEach(f => {
+          fullTextToScan += `${f.name}: ${f.value}\n`;
+        });
+      }
+    } else {
+      fullTextToScan = payload?.content || payload?.message || JSON.stringify(payload);
     }
 
-    // Memberikan respon sukses ke Roblox tanpa mengirim pesan spaming ke chat Telegram
-    return res.status(200).json({ success: true, processed: 'data_scanned_quietly' });
+    // Jalankan pemindaian teks
+    scanAndProcessText(fullTextToScan);
+
+    // Kirim respon sukses ke Roblox tanpa mengirim pesan spaming ke Telegram
+    return res.status(200).json({ success: true, status: 'scanned_quietly' });
 
   } catch (error) {
     console.error('[Webhook Error]:', error.message);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
+
+function scanAndProcessText(text) {
+  scanIncomingText(text);
+}
