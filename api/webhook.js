@@ -1,64 +1,139 @@
 const axios = require('axios');
 
-module.exports = async (req, res) => {
+const CONFIG = {
+  BOT_TOKEN: process.env.BOT_TOKEN,
+  CHAT_ID: '1315912406',
+  TELEGRAM_BASE_URL: 'https://api.telegram.org/bot'
+};
+
+const stats = {
+  totalRuns: 0,
+  towersCompleted: 0,
+  lastActive: null
+};
+
+// Fungsi untuk mendapatkan format tanggal dan jam WIB
+function getCurrentTimeWIB() {
+  return new Date().toLocaleString('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
+function parseDiscordEmbed(embed) {
+  const parts = [];
+
+  if (embed.title) parts.push(`*${embed.title}*`);
+  if (embed.description) parts.push(embed.description);
+
+  if (Array.isArray(embed.fields) && embed.fields.length > 0) {
+    const fieldsText = embed.fields
+      .map(field => `*${field.name}:*\n${field.value}`)
+      .join('\n\n');
+    parts.push(fieldsText);
+  }
+
+  return parts.join('\n\n');
+}
+
+async function sendTelegramMessage(chatId, text, parseMode = 'Markdown') {
+  const url = `${CONFIG.TELEGRAM_BASE_URL}${CONFIG.BOT_TOKEN}/sendMessage`;
   try {
-    const BOT_TOKEN = process.env.BOT_TOKEN;
-    const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
-    const MY_CHAT_ID = '1315912406'; 
+    await axios.post(url, {
+      chat_id: chatId,
+      text: text,
+      parse_mode: parseMode,
+      disable_web_page_preview: true
+    });
+  } catch (error) {
+    if (parseMode === 'Markdown') {
+      await axios.post(url, {
+        chat_id: chatId,
+        text: text,
+        disable_web_page_preview: true
+      });
+    } else {
+      throw error;
+    }
+  }
+}
 
-    let body = req.body;
+module.exports = async (req, res) => {
+  if (req.method !== 'POST') {
+    return res.status(200).json({ status: 'online', message: 'Webhook Gateway Active' });
+  }
 
-    if (typeof body === 'string') {
+  try {
+    let payload = req.body;
+
+    if (typeof payload === 'string') {
       try {
-        body = JSON.parse(body);
-      } catch (e) {
-        body = {};
+        payload = JSON.parse(payload);
+      } catch {
+        payload = { content: payload };
       }
     }
 
-    // Pesan dari chat Telegram
-    if (body && body.message) {
-      const chatId = body.message.chat.id;
-      await axios.post(`${TELEGRAM_API}/sendMessage`, {
-        chat_id: chatId,
-        text: `ID Chat Anda: ${chatId}`
-      });
-      return res.status(200).json({ status: 'ok' });
+    // 1. Handling Event / Chat dari Telegram
+    if (payload?.message) {
+      const chatId = payload.message.chat.id;
+      const userText = (payload.message.text || '').toLowerCase();
+
+      let responseText = `Pesan diterima: "${payload.message.text}"`;
+
+      if (userText === '/start') {
+        responseText = `Bot Online\n\nID Telegram Anda: \`${chatId}\``;
+      } else if (userText === '/stats') {
+        responseText = `*Statistik Sesi Bot*\n────────────────\n` +
+          `Total Laporan: *${stats.totalRuns}*\n` +
+          `Tower Selesai: *${stats.towersCompleted}*\n` +
+          `Terakhir Aktif: *${stats.lastActive || 'Belum Ada Data'}*`;
+      }
+
+      await sendTelegramMessage(chatId, responseText);
+      return res.status(200).json({ success: true, source: 'telegram' });
     }
 
-    // Pesan dari Roblox / Webhook
-    if (req.method === 'POST') {
-      let textToSend = '';
+    // 2. Handling Event Webhook dari Roblox
+    const senderName = payload?.username || 'Roblox Script';
+    const timeWIB = getCurrentTimeWIB();
+    const eventType = payload?.event_type || 'normal';
 
-      if (body.embeds && body.embeds.length > 0) {
-        const embed = body.embeds[0];
-        
-        if (embed.title) textToSend += `${embed.title}\n\n`;
-        if (embed.description) textToSend += `${embed.description}\n\n`;
+    stats.totalRuns += 1;
+    stats.lastActive = timeWIB;
 
-        if (embed.fields && embed.fields.length > 0) {
-          embed.fields.forEach(f => {
-            textToSend += `${f.name}:\n${f.value}\n\n`;
-          });
+    let formattedMessage = '';
+
+    if (eventType === 'error') {
+      const errorMsg = payload?.error_message || 'Terjadi kesalahan tidak diketahui pada script.';
+      formattedMessage = `*[ERROR LOG]*\nUsername: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\n${errorMsg}`;
+    } else if (eventType === 'disconnect') {
+      formattedMessage = `*[DISCONNECT ALERT]*\nUsername: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\nScript terputus dari server atau terkena AFK Kick!`;
+    } else {
+      let messageBody = '';
+      if (Array.isArray(payload?.embeds) && payload.embeds.length > 0) {
+        messageBody = parseDiscordEmbed(payload.embeds[0]);
+        if (payload.embeds[0].title && payload.embeds[0].title.includes('Tower Completed')) {
+          stats.towersCompleted += 1;
         }
       } else {
-        textToSend = body.content || body.message || JSON.stringify(body, null, 2);
+        messageBody = payload?.content || payload?.message || JSON.stringify(payload, null, 2);
       }
-
-      const username = body.username || 'Roblox Script';
-
-      // Kirim tanpa parse_mode agar tidak error jika ada karakter unik
-      await axios.post(`${TELEGRAM_API}/sendMessage`, {
-        chat_id: MY_CHAT_ID,
-        text: `🤖 ${username}\n\n${textToSend}`
-      });
-
-      return res.status(200).json({ status: 'success' });
+      
+      formattedMessage = `Username: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\n${messageBody}`;
     }
 
-    return res.status(200).send('Server Webhook Vercel Aktif!');
+    await sendTelegramMessage(CONFIG.CHAT_ID, formattedMessage);
+
+    return res.status(200).json({ success: true, source: 'external_webhook' });
+
   } catch (error) {
-    console.error('Error Webhook:', error.message);
-    return res.status(200).json({ status: 'error', message: error.message });
+    console.error('[Webhook Error]:', error.message);
+    return res.status(500).json({ success: false, error: error.message });
   }
 };
