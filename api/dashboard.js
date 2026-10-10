@@ -38,7 +38,19 @@ function formatUptime(ms) {
   const days = Math.floor(sec / 86400);
   const hours = Math.floor((sec % 86400) / 3600);
   const minutes = Math.floor((sec % 3600) / 60);
-  return days > 0 ? `${days}h ${hours}j ${minutes}m` : `${hours}j ${minutes}m`;
+  return days > 0 ? `${days}h ${hours}j${minutes}m` : `${hours}j${minutes}m`;
+}
+
+// FUNGSI PEMBERSIH UNTUK TAMPILAN UI
+function cleanUidata(str) {
+  if (!str) return '';
+  return str
+    .replace(/[\*_~`]/g, '')
+    .replace(/Completed!/gi, '')
+    .replace(/Name:/gi, '')
+    .replace(/Floor Reached/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 module.exports = async (req, res) => {
@@ -155,8 +167,12 @@ module.exports = async (req, res) => {
 
       const totalGems = parseInt(gems.result || 0, 10);
       const totalTrait = parseInt(trait.result || 0, 10);
-      const unitsReceived = Array.isArray(units.result) ? units.result : (units.result ? [units.result] : []);
-      const towerList = Array.isArray(towers.result) ? towers.result : (towers.result ? [towers.result] : []);
+      const rawUnits = Array.isArray(units.result) ? units.result : (units.result ? [units.result] : []);
+      const rawTowers = Array.isArray(towers.result) ? towers.result : (towers.result ? [towers.result] : []);
+
+      // BERSIHKAN TEKS BUG DI UI
+      const unitsReceived = rawUnits.map(u => cleanUidata(u)).filter(Boolean);
+      const towerList = rawTowers.map(t => cleanUidata(t)).filter(Boolean);
 
       totalGemsGlobal += totalGems;
       totalTraitGlobal += totalTrait;
@@ -164,9 +180,11 @@ module.exports = async (req, res) => {
 
       const potionsObj = {};
       if (Array.isArray(potionsRaw.result)) {
-        for (let i = 0; i < potionsRaw.result.length; i += 2) potionsObj[potionsRaw.result[i]] = potionsRaw.result[i + 1];
+        for (let i = 0; i < potionsRaw.result.length; i += 2) potionsObj[cleanUidata(potionsRaw.result[i])] = potionsRaw.result[i + 1];
       } else if (typeof potionsRaw.result === 'object' && potionsRaw.result !== null) {
-        Object.assign(potionsObj, potionsRaw.result);
+        Object.keys(potionsRaw.result).forEach(k => {
+          potionsObj[cleanUidata(k)] = potionsRaw.result[k];
+        });
       }
 
       const duration = Math.max((now - parseInt(start.result || now, 10)) / 3600000, 0.01);
