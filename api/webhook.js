@@ -14,6 +14,7 @@ async function redisCmd(command, ...args) {
     });
     return (await res.json()).result;
   } catch (e) {
+    console.error('Redis Exec Error:', e);
     return null;
   }
 }
@@ -30,12 +31,14 @@ async function sendTelegramAlert(message) {
         parse_mode: 'HTML'
       })
     });
-  } catch (e) {}
+  } catch (e) {
+    console.error('Telegram Error:', e);
+  }
 }
 
-function sanitizeString(str) {
+function cleanText(str) {
   if (!str) return '';
-  return str
+  return String(str)
     .replace(/[\*_~`#]/g, '')
     .replace(/Completed!/gi, '')
     .replace(/Name:/gi, '')
@@ -44,60 +47,71 @@ function sanitizeString(str) {
     .trim();
 }
 
-function extractNumber(text, pattern) {
-  const match = text.match(pattern);
-  if (!match) return 0;
-  const numStr = match[1].replace(/[,.]/g, '');
-  const parsed = parseInt(numStr, 10);
-  return isNaN(parsed) ? 0 : parsed;
-}
-
 module.exports = async (req, res) => {
+  // Pengecekan via Browser (GET)
   if (req.method === 'GET') {
     const statusRes = await redisCmd('get', 'system:analytics_status');
     return res.status(200).json({
       success: true,
       service: 'Webhook Gateway Active',
       status: statusRes !== 'disabled' ? 'ONLINE' : 'OFFLINE (Analytics Disabled)',
+      redisConnected: !!CONFIG.REDIS_URL,
       timestamp: new Date().toISOString()
     });
   }
 
   if (req.method === 'POST') {
-    const statusRes = await redisCmd('get', 'system:analytics_status');
-    if (statusRes === 'disabled') {
-      return res.status(200).json({ success: true, message: 'Analytics System IS OFF' });
-    }
-
     try {
-      const body = req.body || {};
+      const statusRes = await redisCmd('get', 'system:analytics_status');
+      if (statusRes === 'disabled') {
+        return res.status(200).json({ success: true, message: 'Analytics System IS OFF' });
+      }
+
+      // Pastikan body ter-parse dengan baik
+      let body = req.body;
+      if (typeof body === 'string') {
+        try { body = JSON.parse(body); } catch(e) {}
+      }
+      body = body || {};
+
       const payloadStr = JSON.stringify(body);
       const byteLength = Buffer.byteLength(payloadStr, 'utf8');
 
+      // Tracker Global Upstash Persisten
       await redisCmd('incr', 'global:total_commands');
       await redisCmd('incrby', 'global:total_bytes', byteLength);
 
-      const content = body.content || '';
-      const embeds = body.embeds || [];
-      
-      let fullText = content + '\n';
-      embeds.forEach(e => {
-        if (e.title) fullText += e.title + '\n';
-        if (e.description) fullText += e.description + '\n';
-        if (e.author && e.author.name) fullText += e.author.name + '\n';
-        if (e.fields && Array.isArray(e.fields)) {
-          e.fields.forEach(f => { fullText += `${f.name \vert{}\vert{} ''}:${f.value || ''}\n`; });
-        }
-      });
+      // Ekstraksi Teks Lengkap dari Seluruh Bagian Payload Discord
+      let textChunks = [];
+      if (body.content) textChunks.push(body.content);
+      if (body.username) textChunks.push(body.username);
 
-      // Ekstrak Username secara cerdas
+      if (Array.isArray(body.embeds)) {
+        body.embeds.forEach(e => {
+          if (e.title) textChunks.push(e.title);
+          if (e.description) textChunks.push(e.description);
+          if (e.author && e.author.name) textChunks.push(e.author.name);
+          if (e.footer && e.footer.text) textChunks.push(e.footer.text);
+          if (Array.isArray(e.fields)) {
+            e.fields.forEach(f => {
+              if (f.name) textChunks.push(f.name);
+              if (f.value) textChunks.push(f.value);
+            });
+          }
+        });
+      }
+
+      const rawFullText = textChunks.join('\n');
+      const cleanFullText = cleanText(rawFullText);
+
+      // Tentukan Nama Akun / User
       let username = 'Player';
-      if (body.username) {
-        username = sanitizeString(body.username);
-      } else if (embeds.length > 0 && embeds[0].author && embeds[0].author.name) {
-        username = sanitizeString(embeds[0].author.name);
+      if (body.username && body.username !== 'Webhook') {
+        username = cleanText(body.username);
+      } else if (body.embeds && body.embeds[0] && body.embeds[0].author && body.embeds[0].author.name) {
+        username = cleanText(body.embeds[0].author.name);
       } else {
-        const uMatch = fullText.match(/(?:User|Player|Account|Nama)\s*[:=]?\s*([a-zA-Z0-9_]+)/i);
+        const uMatch = rawFullText.match(/(?:User|Player|Account|Nama)\s*[:=]?\s*([a-zA-Z0-9_]+)/i);
         if (uMatch) username = uMatch[1];
       }
 
@@ -106,7 +120,7 @@ module.exports = async (req, res) => {
       const prefix = `stats:${username}`;
       const now = Date.now();
 
-      // REGISTRASI USER WAJIB KELUAR DI DASHBOARD
+      // Pendaftaran Akun ke Index Stats Users
       await redisCmd('sadd', 'stats:users', username);
       await redisCmd('set', `${prefix}:lastSeen`, now);
 
@@ -119,49 +133,55 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // 1. Parse Gems (Multi-pattern support)
-      const gemsCount = extractNumber(fullText, /(?:Gems|Gem)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
-      if (gemsCount > 0) await redisCmd('incrby', `${prefix}:totalGems`, gemsCount);
+      // 1. Ekstraksi Gems
+      const gemsMatch = rawFullText.match(/(?:Gems|Gem)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
+      if (gemsMatch) {
+        const val = parseInt(gemsMatch[1].replace(/[,.]/g, ''), 10);
+        if (!isNaN(val) && val > 0) await redisCmd('incrby', `${prefix}:totalGems`, val);
+      }
 
-      // 2. Parse Trait Reroll
-      const traitCount = extractNumber(fullText, /(?:Trait|Reroll|Trait Reroll)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
-      if (traitCount > 0) await redisCmd('incrby', `${prefix}:totalTraitReroll`, traitCount);
+      // 2. Ekstraksi Trait Reroll
+      const traitMatch = rawFullText.match(/(?:Trait|Reroll|Trait Reroll)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
+      if (traitMatch) {
+        const val = parseInt(traitMatch[1].replace(/[,.]/g, ''), 10);
+        if (!isNaN(val) && val > 0) await redisCmd('incrby', `${prefix}:totalTraitReroll`, val);
+      }
 
-      // 3. Parse Unit Diterima
-      const unitMatches = [...fullText.matchAll(/(?:Got Unit|Received Unit|Dapat Unit|Unit)\s*[:=]?\s*([^\n\r,]+)/gi)];
-      for (const uMatch of unitMatches) {
-        const cleanUnit = sanitizeString(uMatch[1]);
-        if (cleanUnit && cleanUnit.length > 1) {
-          await redisCmd('rpush', `${prefix}:unitsReceived`, cleanUnit);
-          await sendTelegramAlert(`🎲 <b>LAPORAN UNIT DITERIMA!</b>\n\n👤 Akun: <b>${username}</b>\n🎁 Unit: <b>${cleanUnit}</b>`);
+      // 3. Ekstraksi Unit Diterima & Telegram Notif
+      const unitMatches = [...rawFullText.matchAll(/(?:Got Unit|Received Unit|Dapat Unit|Unit)\s*[:=]?\s*([^\n\r,]+)/gi)];
+      for (const m of unitMatches) {
+        const item = cleanText(m[1]);
+        if (item) {
+          await redisCmd('rpush', `${prefix}:unitsReceived`, item);
+          await sendTelegramAlert(`🎲 <b>LAPORAN UNIT DITERIMA!</b>\n\n👤 Akun: <b>${username}</b>\n🎁 Unit: <b>${item}</b>`);
         }
       }
 
-      // 4. Parse Tower / Floor
-      const towerMatches = [...fullText.matchAll(/(?:Tower|Floor|Lantai)\s*[:=]?\s*([^\n\r,]+)/gi)];
-      for (const tMatch of towerMatches) {
-        const cleanTower = sanitizeString(tMatch[1]);
-        if (cleanTower && cleanTower.length > 1) {
-          await redisCmd('rpush', `${prefix}:towerList`, cleanTower);
+      // 4. Ekstraksi Tower / Floor Selesai
+      const towerMatches = [...rawFullText.matchAll(/(?:Tower|Floor|Lantai)\s*[:=]?\s*([^\n\r,]+)/gi)];
+      for (const m of towerMatches) {
+        const item = cleanText(m[1]);
+        if (item) {
+          await redisCmd('rpush', `${prefix}:towerList`, item);
           await redisCmd('incr', `${prefix}:towerSelesai`);
-          await sendTelegramAlert(`🏆 <b>TOWER / FLOOR SELESAI!</b>\n\n👤 Akun: <b>${username}</b>\n🏰 Tower: <b>${cleanTower}</b>`);
+          await sendTelegramAlert(`🏆 <b>TOWER / FLOOR SELESAI!</b>\n\n👤 Akun: <b>${username}</b>\n🏰 Tower: <b>${item}</b>`);
         }
       }
 
-      // 5. Parse Item & Potions
-      const potionMatches = [...fullText.matchAll(/(?:Potion|Item|Boost)\s*([a-zA-Z0-9\s]+?)\s*x\s*([\d,.]+)/gi)];
-      for (const pMatch of potionMatches) {
-        const pName = sanitizeString(pMatch[1]);
-        const pQty = parseInt(pMatch[2].replace(/[,.]/g, ''), 10);
+      // 5. Ekstraksi Potion / Item
+      const potionMatches = [...rawFullText.matchAll(/(?:Potion|Item|Boost)\s*([a-zA-Z0-9\s]+?)\s*x\s*([\d,.]+)/gi)];
+      for (const m of potionMatches) {
+        const pName = cleanText(m[1]);
+        const pQty = parseInt(m[2].replace(/[,.]/g, ''), 10);
         if (pName && !isNaN(pQty) && pQty > 0) {
           await redisCmd('hincrby', `${prefix}:potions`, pName, pQty);
         }
       }
 
-      return res.status(200).json({ success: true, user: username });
+      return res.status(200).json({ success: true, processedUser: username });
     } catch (err) {
-      console.error('Webhook processing error:', err);
-      return res.status(500).json({ error: 'Internal Server Error' });
+      console.error('Webhook Error:', err);
+      return res.status(500).json({ error: 'Internal Server Error', details: err.message });
     }
   }
 
