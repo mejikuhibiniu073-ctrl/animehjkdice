@@ -22,20 +22,27 @@ module.exports = async (req, res) => {
 
   let grandTotalGems = 0;
   let grandTotalTrait = 0;
+  let totalLaporanSemua = 0;
+
+  const now = Date.now();
 
   for (const user of users) {
     const prefix = `stats:${user}`;
     const totalLaporan = parseInt((await redisCmd('get', `${prefix}:totalLaporan`)) || 0, 10);
     const totalGems = parseInt((await redisCmd('get', `${prefix}:totalGems`)) || 0, 10);
     const totalTrait = parseInt((await redisCmd('get', `${prefix}:totalTraitReroll`)) || 0, 10);
-    const startTime = parseInt((await redisCmd('get', `${prefix}:startTime`)) || Date.now(), 10);
+    const startTime = parseInt((await redisCmd('get', `${prefix}:startTime`)) || now, 10);
 
-    const durationHours = Math.max((Date.now() - startTime) / (1000 * 60 * 60), 0.01);
+    const durationHours = Math.max((now - startTime) / (1000 * 60 * 60), 0.01);
     const gemsPerHour = Math.round(totalGems / durationHours);
     const traitPerHour = Math.round(totalTrait / durationHours);
 
+    // Cek keaktifan akun (jika durasi awal < 5 jam)
+    const isOnline = (now - startTime) < (5 * 60 * 60 * 1000);
+
     grandTotalGems += totalGems;
     grandTotalTrait += totalTrait;
+    totalLaporanSemua += totalLaporan;
 
     accountsData.push({
       user,
@@ -43,7 +50,8 @@ module.exports = async (req, res) => {
       totalGems,
       totalTrait,
       gemsPerHour,
-      traitPerHour
+      traitPerHour,
+      isOnline
     });
   }
 
@@ -53,126 +61,186 @@ module.exports = async (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Roblox Farm Monitoring Dashboard</title>
+  <title>Roblox Webhook Command Center</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
+    :root {
+      --bg-dark: #080c14;
+      --card-bg: rgba(22, 30, 46, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-blue: #38bdf8;
+      --accent-purple: #c084fc;
+      --accent-green: #34d399;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+
     * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; }
-    body { background-color: #0b0f19; color: #f1f5f9; min-height: 100vh; padding: 2rem 1rem; }
-    .container { max-width: 1200px; margin: 0 auto; }
+    body { background-color: var(--bg-dark); color: var(--text-main); min-height: 100vh; padding: 2rem 1.5rem; }
+    .container { max-width: 1300px; margin: 0 auto; }
 
-    /* Header */
-    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
-    .header h1 { font-size: 1.8rem; font-weight: 800; background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
-    .badge-live { display: inline-flex; align-items: center; gap: 0.5rem; background: rgba(16, 185, 129, 0.1); color: #10b981; padding: 0.4rem 0.8rem; border-radius: 9999px; border: 1px solid rgba(16, 185, 129, 0.2); font-size: 0.85rem; font-weight: 600; }
-    .pulse { width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse-animation 1.5s infinite; }
-    @keyframes pulse-animation { 0% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(16, 185, 129, 0); } 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); } }
+    /* Top Navigation Header */
+    .nav-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
+    .brand-title { display: flex; align-items: center; gap: 0.75rem; }
+    .brand-logo { width: 42px; height: 42px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; font-weight: 800; color: #fff; box-shadow: 0 0 20px rgba(56, 189, 248, 0.4); }
+    .brand-text h1 { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; background: linear-gradient(135deg, #fff, var(--text-muted)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .brand-text p { font-size: 0.8rem; color: var(--text-muted); }
 
-    /* Cards Grid */
-    .grid-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
-    .card-stat { background: #161e2e; border: 1px solid #243044; border-radius: 1rem; padding: 1.25rem; backdrop-filter: blur(8px); transition: transform 0.2s ease, border-color 0.2s ease; }
-    .card-stat:hover { transform: translateY(-3px); border-color: #38bdf8; }
-    .card-stat .title { color: #94a3b8; font-size: 0.85rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-    .card-stat .value { font-size: 1.8rem; font-weight: 800; margin-top: 0.5rem; color: #f8fafc; }
-    .card-stat .subtext { font-size: 0.8rem; color: #64748b; margin-top: 0.25rem; }
+    .header-controls { display: flex; align-items: center; gap: 1rem; }
+    .btn-refresh { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 1.2rem; border-radius: 10px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); }
+    .btn-refresh:hover { border-color: var(--accent-blue); color: var(--accent-blue); transform: translateY(-1px); }
+    .status-badge { display: flex; align-items: center; gap: 0.5rem; background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.2); color: var(--accent-green); padding: 0.5rem 1rem; border-radius: 9999px; font-size: 0.8rem; font-weight: 700; }
+    .pulse-dot { width: 8px; height: 8px; background: var(--accent-green); border-radius: 50%; box-shadow: 0 0 10px var(--accent-green); animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.2); } 100% { opacity: 1; transform: scale(1); } }
 
-    /* Chart Section */
-    .chart-container { background: #161e2e; border: 1px solid #243044; border-radius: 1rem; padding: 1.5rem; margin-bottom: 2rem; }
-    .chart-header { margin-bottom: 1rem; font-size: 1.1rem; font-weight: 700; color: #cbd5e1; }
+    /* Key Statistics Grid */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
+    .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); position: relative; overflow: hidden; transition: all 0.3s ease; }
+    .stat-card:hover { border-color: rgba(56, 189, 248, 0.3); transform: translateY(-2px); }
+    .stat-card::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: linear-gradient(90deg, transparent, var(--accent-blue), transparent); opacity: 0; transition: opacity 0.3s; }
+    .stat-card:hover::before { opacity: 1; }
+    .stat-label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-value { font-size: 2rem; font-weight: 800; margin-top: 0.5rem; letter-spacing: -0.02em; }
+    .val-gems { color: var(--accent-blue); text-shadow: 0 0 20px rgba(56, 189, 248, 0.3); }
+    .val-trait { color: var(--accent-purple); text-shadow: 0 0 20px rgba(192, 132, 252, 0.3); }
 
-    /* Table Section */
-    .table-container { background: #161e2e; border: 1px solid #243044; border-radius: 1rem; overflow: hidden; }
+    /* Visual Charts Section */
+    .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.25rem; margin-bottom: 2rem; }
+    .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
+    .chart-title { font-size: 1rem; font-weight: 700; color: var(--text-main); margin-bottom: 1.25rem; display: flex; justify-content: space-between; align-items: center; }
+
+    /* Interactive Data Table */
+    .table-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); overflow: hidden; }
+    .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 1rem; }
+    .search-input { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 1rem; border-radius: 10px; font-size: 0.85rem; outline: none; width: 250px; transition: border-color 0.2s; }
+    .search-input:focus { border-color: var(--accent-blue); }
+
+    .table-wrapper { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
-    th { background: #1e293b; color: #94a3b8; font-weight: 600; padding: 1rem; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; }
-    td { padding: 1rem; border-top: 1px solid #243044; color: #e2e8f0; }
-    tr:hover { background: rgba(51, 65, 85, 0.3); }
-    .user-pill { font-weight: 700; color: #38bdf8; }
-    .highlight-gems { color: #38bdf8; font-weight: 700; }
-    .highlight-trait { color: #a855f7; font-weight: 700; }
+    th { padding: 1rem; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--card-border); }
+    td { padding: 1.1rem 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.03); color: var(--text-main); }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+    
+    .status-pill { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: 600; }
+    .status-online { background: rgba(52, 211, 153, 0.1); color: var(--accent-green); }
 
-    @media (max-width: 768px) {
-      .table-container { overflow-x: auto; }
+    @media (max-width: 900px) {
+      .charts-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
   <div class="container">
     
-    <!-- Top Header -->
-    <div class="header">
-      <div>
-        <h1>Roblox Webhook Analytics</h1>
-        <p style="color: #64748b; font-size: 0.9rem; margin-top: 0.2rem;">Live Monitoring & Statistics Dashboard</p>
+    <!-- Navigation Header -->
+    <div class="nav-header">
+      <div class="brand-title">
+        <div class="brand-logo">R</div>
+        <div class="brand-text">
+          <h1>Command Center</h1>
+          <p>Real-Time Roblox Farming Analytics</p>
+        </div>
       </div>
-      <div class="badge-live">
-        <div class="pulse"></div> Live Auto-Refresh
-      </div>
-    </div>
-
-    <!-- Stat Cards -->
-    <div class="grid-cards">
-      <div class="card-stat">
-        <div class="title">Total Akun Aktif</div>
-        <div class="value">${users.length}</div>
-        <div class="subtext">Sesi aktif 5 jam terakhir</div>
-      </div>
-      <div class="card-stat">
-        <div class="title">Total Gems Terkumpul</div>
-        <div class="value highlight-gems">x${grandTotalGems.toLocaleString('id-ID')}</div>
-        <div class="subtext">Akumulasi seluruh akun</div>
-      </div>
-      <div class="card-stat">
-        <div class="title">Total Trait Reroll</div>
-        <div class="value highlight-trait">x${grandTotalTrait.toLocaleString('id-ID')}</div>
-        <div class="subtext">Akumulasi seluruh akun</div>
+      <div class="header-controls">
+        <button class="btn-refresh" onclick="window.location.reload()">🔄 Refresh</button>
+        <div class="status-badge">
+          <div class="pulse-dot"></div> LIVE MONITORING
+        </div>
       </div>
     </div>
 
-    <!-- Visual Chart -->
-    <div class="chart-container">
-      <div class="chart-header">📊 Perbandingan Hasil Farming Per Akun</div>
-      <canvas id="farmChart" height="100"></canvas>
+    <!-- Key Metrics Cards -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Akun Terhubung</div>
+        <div class="stat-value">${users.length}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Laporan Sesi</div>
+        <div class="stat-value">${totalLaporanSemua.toLocaleString('id-ID')}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Gems</div>
+        <div class="stat-value val-gems">x${grandTotalGems.toLocaleString('id-ID')}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Total Trait Reroll</div>
+        <div class="stat-value val-trait">x${grandTotalTrait.toLocaleString('id-ID')}</div>
+      </div>
     </div>
 
-    <!-- Data Table -->
-    <div class="table-container">
-      <table>
-        <thead>
-          <tr>
-            <th>Username</th>
-            <th>Laporan</th>
-            <th>Total Gems</th>
-            <th>Total Trait</th>
-            <th>Rate Gems/Jam</th>
-            <th>Rate Trait/Jam</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${accountsData.length > 0 ? accountsData.map(acc => `
+    <!-- Charts Section -->
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-title">
+          <span>📊 Hasil Farming Per Akun</span>
+        </div>
+        <canvas id="barChart" height="110"></canvas>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">
+          <span>🎯 Distribusi Gems</span>
+        </div>
+        <canvas id="doughnutChart" height="220"></canvas>
+      </div>
+    </div>
+
+    <!-- Interactive Data Table -->
+    <div class="table-card">
+      <div class="table-header">
+        <h3 style="font-size: 1.1rem; font-weight: 700;">📋 Rincian Performa Akun</h3>
+        <input type="text" id="searchInput" class="search-input" placeholder="Cari username..." onkeyup="filterTable()">
+      </div>
+      <div class="table-wrapper">
+        <table id="accountsTable">
+          <thead>
             <tr>
-              <td class="user-pill">👤 ${acc.user}</td>
-              <td>${acc.totalLaporan} Laporan</td>
-              <td class="highlight-gems">x${acc.totalGems.toLocaleString('id-ID')}</td>
-              <td class="highlight-trait">x${acc.totalTrait.toLocaleString('id-ID')}</td>
-              <td>~${acc.gemsPerHour.toLocaleString('id-ID')} / jam</td>
-              <td>~${acc.traitPerHour.toLocaleString('id-ID')} / jam</td>
+              <th>Status</th>
+              <th>Username</th>
+              <th>Total Laporan</th>
+              <th>Total Gems</th>
+              <th>Total Trait</th>
+              <th>Rate Gems/Jam</th>
+              <th>Rate Trait/Jam</th>
             </tr>
-          `).join('') : `
-            <tr>
-              <td colspan="6" style="text-align: center; color: #64748b; padding: 2rem;">Belum ada data statistik masuk.</td>
-            </tr>
-          `}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            ${accountsData.length > 0 ? accountsData.map(acc => `
+              <tr>
+                <td><span class="status-pill status-online">● Active</span></td>
+                <td style="font-weight: 700; color: var(--accent-blue);">👤 ${acc.user}</td>
+                <td>${acc.totalLaporan} log</td>
+                <td style="font-weight: 700; color: var(--accent-blue);">x${acc.totalGems.toLocaleString('id-ID')}</td>
+                <td style="font-weight: 700; color: var(--accent-purple);">x${acc.totalTrait.toLocaleString('id-ID')}</td>
+                <td>~${acc.gemsPerHour.toLocaleString('id-ID')} / jam</td>
+                <td>~${acc.traitPerHour.toLocaleString('id-ID')} / jam</td>
+              </tr>
+            `).join('') : `
+              <tr>
+                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 2rem;">Belum ada data statistik tersedia.</td>
+              </tr>
+            `}
+          </tbody>
+        </table>
+      </div>
     </div>
 
   </div>
 
   <script>
-    // Auto Refresh setiap 30 detik
-    setTimeout(() => {
-      window.location.reload();
-    }, 30000);
+    // Auto-Refresh tiap 30 detik
+    setTimeout(() => { window.location.reload(); }, 30000);
+
+    // Filter Pencarian Tabel
+    function filterTable() {
+      const input = document.getElementById('searchInput').value.toLowerCase();
+      const rows = document.querySelectorAll('#accountsTable tbody tr');
+      rows.forEach(row => {
+        const username = row.cells[1] ? row.cells[1].innerText.toLowerCase() : '';
+        row.style.display = username.includes(input) ? '' : 'none';
+      });
+    }
 
     // Chart Configuration
     const rawData = ${JSON.stringify(accountsData)};
@@ -180,52 +248,42 @@ module.exports = async (req, res) => {
     const gemsData = rawData.map(d => d.totalGems);
     const traitData = rawData.map(d => d.totalTrait);
 
-    const ctx = document.getElementById('farmChart').getContext('2d');
-
-    const gradientGems = ctx.createLinearGradient(0, 0, 0, 300);
-    gradientGems.addColorStop(0, '#38bdf8');
-    gradientGems.addColorStop(1, '#0284c7');
-
-    const gradientTrait = ctx.createLinearGradient(0, 0, 0, 300);
-    gradientTrait.addColorStop(0, '#a855f7');
-    gradientTrait.addColorStop(1, '#7e22ce');
-
-    new Chart(ctx, {
+    // Bar Chart
+    const ctxBar = document.getElementById('barChart').getContext('2d');
+    new Chart(ctxBar, {
       type: 'bar',
       data: {
         labels: labels,
         datasets: [
-          {
-            label: 'Total Gems',
-            data: gemsData,
-            backgroundColor: gradientGems,
-            borderRadius: 6
-          },
-          {
-            label: 'Total Trait Reroll',
-            data: traitData,
-            backgroundColor: gradientTrait,
-            borderRadius: 6
-          }
+          { label: 'Gems', data: gemsData, backgroundColor: '#38bdf8', borderRadius: 8 },
+          { label: 'Trait Reroll', data: traitData, backgroundColor: '#c084fc', borderRadius: 8 }
         ]
       },
       options: {
         responsive: true,
-        plugins: {
-          legend: {
-            labels: { color: '#cbd5e1', font: { family: 'Plus Jakarta Sans', weight: '600' } }
-          }
-        },
+        plugins: { legend: { labels: { color: '#94a3b8', font: { family: 'Plus Jakarta Sans', weight: '600' } } } },
         scales: {
-          x: {
-            grid: { color: '#1e293b' },
-            ticks: { color: '#94a3b8', font: { family: 'Plus Jakarta Sans' } }
-          },
-          y: {
-            grid: { color: '#1e293b' },
-            ticks: { color: '#94a3b8', font: { family: 'Plus Jakarta Sans' } }
-          }
+          x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#94a3b8' } },
+          y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#94a3b8' } }
         }
+      }
+    });
+
+    // Doughnut Chart
+    const ctxDoughnut = document.getElementById('doughnutChart').getContext('2d');
+    new Chart(ctxDoughnut, {
+      type: 'doughnut',
+      data: {
+        labels: labels,
+        datasets: [{
+          data: gemsData,
+          backgroundColor: ['#38bdf8', '#c084fc', '#34d399', '#f43f5e', '#fbbf24'],
+          borderWidth: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', font: { family: 'Plus Jakarta Sans' } } } }
       }
     });
   </script>
