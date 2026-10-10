@@ -1,3 +1,5 @@
+const system = require('./system');
+
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   CHAT_ID: process.env.CHAT_ID || '1315912406',
@@ -115,7 +117,7 @@ async function scanAndAccumulate(user, text) {
         const rarityMatch = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
         const mutationMatch = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
         
-        // Deteksi nilai rasio kelangkaan (seperti 1/1.6qi, 1/500qd, dll.)
+        // Deteksi rasio kelangkaan (contoh: 1/1.6qi, 1/500qd)
         const chanceMatch = cleanText.match(/1\/\d+(\.\d+)?[a-zA-Z]+/i);
         const chanceText = chanceMatch ? ` [${chanceMatch[0]}]` : '';
 
@@ -123,7 +125,6 @@ async function scanAndAccumulate(user, text) {
         if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
         if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
         
-        // Gabungkan rasio kelangkaan ke dalam string informasi unit
         unitInfo += chanceText;
 
         await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
@@ -232,9 +233,12 @@ async function sendTelegramMessage(chatId, text) {
 }
 
 module.exports = async (req, res) => {
-  const systemStatus = await redisCmd('get', 'system:analytics_status');
-  if (systemStatus === 'disabled') {
-    return res.status(200).json({ status: 'offline', message: 'System Analytics is OFF' });
+  // 1. CEK STATUS DARI MEMORI LOKAL (0% Redis Usage saat status OFF)
+  if (!system.getStatus()) {
+    return res.status(200).json({ 
+      status: 'offline', 
+      message: 'System Analytics is TOTALLY OFF (Zero DB usage)' 
+    });
   }
 
   if (req.method !== 'POST') {
