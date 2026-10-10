@@ -18,7 +18,6 @@ async function redisCmd(command, ...args) {
   }
 }
 
-// KIRIM NOTIFIKASI TELEGRAM DENGAN BOT TOKEN & CHAT ID
 async function sendTelegramAlert(message) {
   if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) return;
   try {
@@ -31,39 +30,35 @@ async function sendTelegramAlert(message) {
         parse_mode: 'HTML'
       })
     });
-  } catch (e) {
-    console.error('Telegram Alert Error:', e);
-  }
+  } catch (e) {}
 }
 
-function cleanUsername(raw) {
-  if (!raw) return 'UnknownUser';
-  let cleaned = raw.replace(/<[^>]*>/g, '').replace(/[\*_~`]/g, '').trim();
-  const match = cleaned.match(/([a-zA-Z0-9_]{3,20})/);
-  return match ? match[1] : cleaned;
-}
-
-// PEMBERSIH FORMAT DISCORD & TEKS BUG
-function cleanText(str) {
+function sanitizeString(str) {
   if (!str) return '';
   return str
-    .replace(/[\*_~`]/g, '')
+    .replace(/[\*_~`#]/g, '')
     .replace(/Completed!/gi, '')
     .replace(/Name:/gi, '')
     .replace(/Floor Reached/gi, '')
-    .replace(/\[.*?\]\(.*?\)/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function extractNumber(text, pattern) {
+  const match = text.match(pattern);
+  if (!match) return 0;
+  const numStr = match[1].replace(/[,.]/g, '');
+  const parsed = parseInt(numStr, 10);
+  return isNaN(parsed) ? 0 : parsed;
 }
 
 module.exports = async (req, res) => {
   if (req.method === 'GET') {
     const statusRes = await redisCmd('get', 'system:analytics_status');
-    const isAnalyticsOn = statusRes !== 'disabled';
     return res.status(200).json({
       success: true,
       service: 'Webhook Gateway Active',
-      status: isAnalyticsOn ? 'ONLINE' : 'OFFLINE (Analytics Disabled)',
+      status: statusRes !== 'disabled' ? 'ONLINE' : 'OFFLINE (Analytics Disabled)',
       timestamp: new Date().toISOString()
     });
   }
@@ -79,36 +74,39 @@ module.exports = async (req, res) => {
       const payloadStr = JSON.stringify(body);
       const byteLength = Buffer.byteLength(payloadStr, 'utf8');
 
-      // Update Tracker Global Persisten
       await redisCmd('incr', 'global:total_commands');
       await redisCmd('incrby', 'global:total_bytes', byteLength);
 
-      // Kumpulkan Teks Laporan
       const content = body.content || '';
       const embeds = body.embeds || [];
       
-      let rawText = content + ' ';
+      let fullText = content + '\n';
       embeds.forEach(e => {
-        rawText += `${e.title \vert{}\vert{} ''}${e.description || ''} `;
+        if (e.title) fullText += e.title + '\n';
+        if (e.description) fullText += e.description + '\n';
+        if (e.author && e.author.name) fullText += e.author.name + '\n';
         if (e.fields && Array.isArray(e.fields)) {
-          e.fields.forEach(f => { rawText += `${f.name \vert{}\vert{} ''}${f.value || ''} `; });
+          e.fields.forEach(f => { fullText += `${f.name \vert{}\vert{} ''}:${f.value || ''}\n`; });
         }
       });
 
-      // Ekstrak Nama Akun
+      // Ekstrak Username secara cerdas
       let username = 'Player';
       if (body.username) {
-        username = cleanUsername(body.username);
+        username = sanitizeString(body.username);
       } else if (embeds.length > 0 && embeds[0].author && embeds[0].author.name) {
-        username = cleanUsername(embeds[0].author.name);
+        username = sanitizeString(embeds[0].author.name);
       } else {
-        const userMatch = rawText.match(/(?:User|Player|Account|Nama)\s*[:=]?\s*([a-zA-Z0-9_]+)/i);
-        if (userMatch) username = userMatch[1];
+        const uMatch = fullText.match(/(?:User|Player|Account|Nama)\s*[:=]?\s*([a-zA-Z0-9_]+)/i);
+        if (uMatch) username = uMatch[1];
       }
+
+      if (!username || username === 'UnknownUser') username = 'Player';
 
       const prefix = `stats:${username}`;
       const now = Date.now();
 
+      // REGISTRASI USER WAJIB KELUAR DI DASHBOARD
       await redisCmd('sadd', 'stats:users', username);
       await redisCmd('set', `${prefix}:lastSeen`, now);
 
@@ -121,56 +119,41 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // 1. Parse Gems
-      const gemsMatch = rawText.match(/(?:Gems|Gem)\s*[:+=]?\s*x?([\d,.]+)/i);
-      if (gemsMatch) {
-        const amount = parseInt(gemsMatch[1].replace(/[,.]/g, ''), 10);
-        if (!isNaN(amount)) await redisCmd('incrby', `${prefix}:totalGems`, amount);
-      }
+      // 1. Parse Gems (Multi-pattern support)
+      const gemsCount = extractNumber(fullText, /(?:Gems|Gem)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
+      if (gemsCount > 0) await redisCmd('incrby', `${prefix}:totalGems`, gemsCount);
 
-      // 2. Parse Trait Rerolls
-      const traitMatch = rawText.match(/(?:Trait|Reroll|Trait Reroll)\s*[:+=]?\s*x?([\d,.]+)/i);
-      if (traitMatch) {
-        const amount = parseInt(traitMatch[1].replace(/[,.]/g, ''), 10);
-        if (!isNaN(amount)) await redisCmd('incrby', `${prefix}:totalTraitReroll`, amount);
-      }
+      // 2. Parse Trait Reroll
+      const traitCount = extractNumber(fullText, /(?:Trait|Reroll|Trait Reroll)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
+      if (traitCount > 0) await redisCmd('incrby', `${prefix}:totalTraitReroll`, traitCount);
 
-      // 3. Parse Unit Diterima & Send Telegram Alert
-      const unitMatch = rawText.match(/(?:Got Unit|Received Unit|Dapat Unit|Unit)\s*[:=]?\s*([^\n\r,]+)/i);
-      if (unitMatch) {
-        const unitName = cleanText(unitMatch[1]);
-        if (unitName) {
-          await redisCmd('rpush', `${prefix}:unitsReceived`, unitName);
-          await sendTelegramAlert(
-            `🎲 <b>LAPORAN UNIT DITERIMA!</b>\n\n` +
-            `👤 Akun: <b>${username}</b>\n` +
-            `🎁 Unit: <b>${unitName}</b>`
-          );
+      // 3. Parse Unit Diterima
+      const unitMatches = [...fullText.matchAll(/(?:Got Unit|Received Unit|Dapat Unit|Unit)\s*[:=]?\s*([^\n\r,]+)/gi)];
+      for (const uMatch of unitMatches) {
+        const cleanUnit = sanitizeString(uMatch[1]);
+        if (cleanUnit && cleanUnit.length > 1) {
+          await redisCmd('rpush', `${prefix}:unitsReceived`, cleanUnit);
+          await sendTelegramAlert(`🎲 <b>LAPORAN UNIT DITERIMA!</b>\n\n👤 Akun: <b>${username}</b>\n🎁 Unit: <b>${cleanUnit}</b>`);
         }
       }
 
-      // 4. Parse Tower / Floor (Murni Nama Tower)
-      const towerMatch = rawText.match(/(?:Tower|Floor|Lantai)\s*[:=]?\s*([^\n\r,\*]+)/i);
-      if (towerMatch) {
-        const towerName = cleanText(towerMatch[1]);
-        if (towerName) {
-          await redisCmd('rpush', `${prefix}:towerList`, towerName);
+      // 4. Parse Tower / Floor
+      const towerMatches = [...fullText.matchAll(/(?:Tower|Floor|Lantai)\s*[:=]?\s*([^\n\r,]+)/gi)];
+      for (const tMatch of towerMatches) {
+        const cleanTower = sanitizeString(tMatch[1]);
+        if (cleanTower && cleanTower.length > 1) {
+          await redisCmd('rpush', `${prefix}:towerList`, cleanTower);
           await redisCmd('incr', `${prefix}:towerSelesai`);
-
-          await sendTelegramAlert(
-            `🏆 <b>TOWER / FLOOR SELESAI!</b>\n\n` +
-            `👤 Akun: <b>${username}</b>\n` +
-            `🏰 Tower: <b>${towerName}</b>`
-          );
+          await sendTelegramAlert(`🏆 <b>TOWER / FLOOR SELESAI!</b>\n\n👤 Akun: <b>${username}</b>\n🏰 Tower: <b>${cleanTower}</b>`);
         }
       }
 
       // 5. Parse Item & Potions
-      const potionMatches = rawText.matchAll(/(?:Potion|Item|Boost)\s*([a-zA-Z0-9\s]+)\s*x?([\d]+)/gi);
-      for (const match of potionMatches) {
-        const pName = cleanText(match[1]);
-        const pQty = parseInt(match[2], 10);
-        if (pName && !isNaN(pQty)) {
+      const potionMatches = [...fullText.matchAll(/(?:Potion|Item|Boost)\s*([a-zA-Z0-9\s]+?)\s*x\s*([\d,.]+)/gi)];
+      for (const pMatch of potionMatches) {
+        const pName = sanitizeString(pMatch[1]);
+        const pQty = parseInt(pMatch[2].replace(/[,.]/g, ''), 10);
+        if (pName && !isNaN(pQty) && pQty > 0) {
           await redisCmd('hincrby', `${prefix}:potions`, pName, pQty);
         }
       }
