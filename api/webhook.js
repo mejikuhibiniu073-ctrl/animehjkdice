@@ -1,13 +1,13 @@
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN,
-  CHAT_ID: '1315912406',
+  CHAT_ID: process.env.CHAT_ID || '1315912406',
   TELEGRAM_BASE_URL: 'https://api.telegram.org/bot',
   REDIS_URL: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
   REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
 };
 
 const TTL_5_HOURS = 18000;
-const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000;
+const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000; // 20 Menit
 
 function getCurrentTimeWIB() {
   return new Date().toLocaleString('id-ID', {
@@ -52,7 +52,7 @@ async function redisCmd(command, ...args) {
     const data = await res.json();
     return data.result;
   } catch (e) {
-    console.error('Redis error:', e);
+    console.error('[Redis Communication Error]:', e);
     return null;
   }
 }
@@ -111,32 +111,38 @@ async function scanAndAccumulate(user, text) {
 
   const cleanText = text.replace(/\*\*/g, '');
 
-  const nameMatch = cleanText.match(/(?:Name|Unit):\s*([^\r\n]+)/i);
-  if (nameMatch) {
-    const rawUnitName = nameMatch[1].replace(/\|\|/g, '').trim();
+  // DETEKSI AKURAT: Memastikan pesan benar-benar sebuah UNIT (Bukan Tower)
+  const isUnitDrop = /Cash\/s|Plot Avg|Grade:|Tier:/i.test(cleanText) && /(?:Name|Unit):/i.test(cleanText);
 
-    if (rawUnitName && !['roblox script', 'stats', 'webhook'].includes(rawUnitName.toLowerCase())) {
-      const mutationMatch = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
-      const rarityMatch = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
+  if (isUnitDrop) {
+    const nameMatch = cleanText.match(/(?:Name|Unit):\s*([^\r\n]+)/i);
+    if (nameMatch) {
+      const rawUnitName = nameMatch[1].replace(/\|\|/g, '').trim();
 
-      // Menaruh Rarity tepat di sebelah Nama Unit
-      let unitInfo = rawUnitName;
-      if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
-      if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
+      if (rawUnitName && !['roblox script', 'stats', 'webhook'].includes(rawUnitName.toLowerCase())) {
+        const rarityMatch = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
+        const mutationMatch = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
 
-      await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
-      await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
+        let unitInfo = rawUnitName;
+        if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
+        if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
 
-      await redisCmd('rpush', `${prefix}:unitsReceived`, unitInfo);
-      await redisCmd('expire', `${prefix}:unitsReceived`, TTL_5_HOURS);
+        await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
+        await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
+
+        await redisCmd('rpush', `${prefix}:unitsReceived`, unitInfo);
+        await redisCmd('expire', `${prefix}:unitsReceived`, TTL_5_HOURS);
+      }
+    }
+  } else {
+    // Hanya hitung Tower Completed jika BUKAN pesan unit
+    if (/tower completed|floor reached/i.test(cleanText)) {
+      await redisCmd('incrby', `${prefix}:towerSelesai`, 1);
+      await redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS);
     }
   }
 
-  if (/tower completed/i.test(cleanText)) {
-    await redisCmd('incrby', `${prefix}:towerSelesai`, 1);
-    await redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS);
-  }
-
+  // Akumulasi Gems
   const gemsMatch = cleanText.match(/Gems:\s*x?([\d,]+)/i);
   if (gemsMatch) {
     const gemsVal = parseInt(gemsMatch[1].replace(/,/g, ''), 10);
@@ -146,6 +152,7 @@ async function scanAndAccumulate(user, text) {
     }
   }
 
+  // Akumulasi Trait Reroll
   const traitMatch = cleanText.match(/Trait Reroll:\s*x?([\d,]+)/i);
   if (traitMatch) {
     const traitVal = parseInt(traitMatch[1].replace(/,/g, ''), 10);
@@ -155,13 +162,15 @@ async function scanAndAccumulate(user, text) {
     }
   }
 
+  // Akumulasi Item / Potion
   const lines = cleanText.split('\n');
   for (const line of lines) {
     const itemMatch = line.match(/([A-Za-z0-9'\s]+):\s*x([\d,]+)/);
     if (itemMatch) {
       const itemName = itemMatch[1].trim();
       const qty = parseInt(itemMatch[2].replace(/,/g, ''), 10);
-      if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached', 'Name', 'Rarity', 'Tier', 'Grade'].includes(itemName) && !isNaN(qty)) {
+      const ignoredKeys = ['Gems', 'Trait Reroll', 'Level', 'Floor Reached', 'Name', 'Rarity', 'Tier', 'Grade', 'Cash/s'];
+      if (!ignoredKeys.includes(itemName) && !isNaN(qty)) {
         await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
         await redisCmd('expire', `${prefix}:potions`, TTL_5_HOURS);
       }
@@ -438,7 +447,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({ success: true, status: 'scanned_and_saved' });
 
   } catch (error) {
-    console.error('[Webhook Error]:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
+    console.error('[Webhook Processing Error]:', error.message);
+    return res.status(500).json({ success: false, error: 'Internal server error processing webhook' });
   }
 };
