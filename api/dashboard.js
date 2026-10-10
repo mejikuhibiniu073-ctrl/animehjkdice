@@ -60,13 +60,32 @@ module.exports = async (req, res) => {
     }
   }
 
-  // Reset Database Action
-  if (req.method === 'POST' && req.body && req.body.action === 'reset') {
+  // API TETAPAN DAN PENGURUSAN
+  if (req.method === 'POST' && req.body && req.body.action) {
     if (cookies.auth !== 'true') {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
-    await redisCmd('flushall');
-    return res.status(200).json({ success: true, message: 'Database telah dibersihkan sepenuhnya.' });
+
+    const { action, key, value, offlineMin } = req.body;
+
+    if (action === 'reset') {
+      await redisCmd('flushall');
+      return res.status(200).json({ success: true, message: 'Database telah dibersihkan.' });
+    }
+
+    if (action === 'deleteKey' && key) {
+      await redisCmd('del', key);
+      if (key.startsWith('stats:')) {
+        const uName = key.replace('stats:', '').split(':')[0];
+        await redisCmd('srem', 'stats:users', uName);
+      }
+      return res.status(200).json({ success: true });
+    }
+
+    if (action === 'setOfflineThreshold' && offlineMin) {
+      await redisCmd('set', 'system:offline_threshold_min', offlineMin);
+      return res.status(200).json({ success: true });
+    }
   }
 
   // HALAMAN LOGIN
@@ -145,9 +164,11 @@ module.exports = async (req, res) => {
     return res.status(200).send(loginHtml);
   }
 
-  // AMBIL DATA DASHBOARD & STATUS SYSTEM
+  // AMBIL DATA DASHBOARD & TENTUKAN URL WEBHOOK
   const systemStatus = (await redisCmd('get', 'system:analytics_status')).result;
   const isAnalyticsOn = systemStatus !== 'disabled';
+
+  const offlineMinConfig = (await redisCmd('get', 'system:offline_threshold_min')).result || '20';
 
   const usersRes = await redisCmd('smembers', 'stats:users');
   let users = usersRes.result;
@@ -191,7 +212,7 @@ module.exports = async (req, res) => {
     const gemsPerHour = Math.round(totalGems / durationHours);
     const traitPerHour = Math.round(totalTrait / durationHours);
 
-    const isOnline = (now - lastSeen) < (20 * 60 * 1000);
+    const isOnline = (now - lastSeen) < (parseInt(offlineMinConfig, 10) * 60 * 1000);
 
     totalGemsGlobal += totalGems;
     totalTraitGlobal += totalTrait;
@@ -214,16 +235,20 @@ module.exports = async (req, res) => {
     });
   }
 
-  // RENDER MAIN DASHBOARD
+  const hostHeader = req.headers.host || 'animehjkdice.vercel.app';
+  const protocol = req.headers['x-forwarded-proto'] || 'https';
+  const webhookUrl = `${protocol}://${hostHeader}/api/webhook`;
+
+  // UTAMA DASHBOARD HTML
   const html = `
 <!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dashboard Analytics & Database Control</title>
+  <title>Dashboard Analytics & Manual Settings</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #07090e;
@@ -248,14 +273,24 @@ module.exports = async (req, res) => {
     .title-group p { font-size: 0.85rem; color: var(--text-muted); }
 
     .header-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-    .btn { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text); padding: 0.6rem 1rem; border-radius: 10px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); }
+    .btn { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text); padding: 0.6rem 1rem; border-radius: 10px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); display: inline-flex; align-items: center; gap: 0.4rem; }
     .btn:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); }
     .btn-danger { border-color: rgba(244, 63, 94, 0.3); color: var(--accent-red); }
     .btn-danger:hover { background: rgba(244, 63, 94, 0.15); border-color: var(--accent-red); color: var(--accent-red); }
 
-    /* TOGGLE SWITCH ON/OFF UI */
+    /* WEBHOOK DISPLAY CARD DENGAN TOMBOL SALIN BARU */
+    .webhook-display-card { background: rgba(18, 26, 43, 0.9); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+    .wh-url-box { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(8, 12, 20, 0.8); border: 1px solid var(--card-border); padding: 0.5rem 1rem; border-radius: 10px; color: var(--accent-cyan); flex: 1; min-width: 280px; overflow-x: auto; white-space: nowrap; }
+    .btn-copy { background: linear-gradient(135deg, var(--accent-cyan), #0284c7); color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 10px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem; }
+    .btn-copy:hover { opacity: 0.9; }
+
+    /* MANUAL SETTINGS PANEL */
+    .settings-panel { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1.5rem; }
+    .setting-item { display: flex; align-items: center; gap: 0.8rem; }
+    .setting-label { font-size: 0.85rem; font-weight: 700; color: var(--text-muted); }
+    .setting-select, .setting-input { background: rgba(18, 26, 43, 0.8); border: 1px solid var(--card-border); color: #fff; padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; outline: none; }
+
     .toggle-container { display: flex; align-items: center; gap: 0.6rem; background: rgba(18, 26, 43, 0.9); padding: 0.4rem 0.8rem; border-radius: 12px; border: 1px solid var(--card-border); }
-    .toggle-label { font-size: 0.8rem; font-weight: 700; color: var(--text-muted); }
     .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
     .switch input { opacity: 0; width: 0; height: 0; }
     .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #334155; transition: .3s; border-radius: 24px; }
@@ -288,9 +323,11 @@ module.exports = async (req, res) => {
     .search-bar { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text); padding: 0.6rem 1rem; border-radius: 10px; font-size: 0.85rem; outline: none; width: 260px; }
 
     .cards-wrapper { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 1.25rem; }
-    .acc-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
+    .acc-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); position: relative; }
     .acc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--card-border); }
     .acc-user { font-size: 1.1rem; font-weight: 800; color: var(--accent-cyan); }
+    .btn-delete-acc { background: none; border: none; color: var(--accent-red); cursor: pointer; font-size: 0.85rem; }
+
     .status-pill { font-size: 0.75rem; font-weight: 700; padding: 0.25rem 0.6rem; border-radius: 6px; }
     .st-online { background: rgba(52, 211, 153, 0.15); color: var(--accent-green); border: 1px solid rgba(52, 211, 153, 0.3); }
     .st-offline { background: rgba(244, 63, 94, 0.15); color: var(--accent-red); border: 1px solid rgba(244, 63, 94, 0.3); }
@@ -316,25 +353,59 @@ module.exports = async (req, res) => {
       <div class="title-group">
         <div class="logo">🎲</div>
         <div>
-          <h1>Analytics & DB Control</h1>
-          <p>Real-Time Upstash Redis Database Center</p>
+          <h1>Analytics & DB Control Center</h1>
+          <p>Real-Time Webhook & Upstash Control Panel</p>
         </div>
       </div>
       <div class="header-right">
-        <!-- TOGGLE ANALYTICS -->
-        <div class="toggle-container">
-          <span class="toggle-label">ANALYSIS</span>
-          <label class="switch">
-            <input type="checkbox" id="analyticsToggle" ${isAnalyticsOn ? 'checked' : ''} onchange="toggleSystemAnalytics(this)">
-            <span class="slider"></span>
-          </label>
-        </div>
-
         <button class="btn" onclick="window.location.reload()">🔄 Refresh /stats</button>
         <button class="btn btn-danger" onclick="confirmReset()">🗑️ /reset Database</button>
         <button class="btn" onclick="logout()">🚪 Logout</button>
       </div>
     </header>
+
+    <!-- KAD WEBHOOK URL LENGKAP DENGAN TOMBOL SALIN -->
+    <div class="webhook-display-card">
+      <div style="font-weight: 700; font-size: 0.9rem; color: var(--text-muted);">WEBHOOK GATEWAY URL:</div>
+      <div class="wh-url-box" id="whUrlValue">${webhookUrl}</div>
+      <button class="btn-copy" onclick="copyWebhookLink()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+        Salin Webhook URL
+      </button>
+    </div>
+
+    <!-- PANEL TETAPAN MANUAL -->
+    <div class="settings-panel">
+      <div class="setting-item">
+        <span class="setting-label">ANALYSIS SYSTEM:</span>
+        <div class="toggle-container">
+          <label class="switch">
+            <input type="checkbox" id="analyticsToggle" ${isAnalyticsOn ? 'checked' : ''} onchange="toggleSystemAnalytics(this)">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting-item">
+        <span class="setting-label">OFFLINE ALERT THRESHOLD:</span>
+        <select class="setting-select" id="offlineSelect" onchange="updateOfflineThreshold(this.value)">
+          <option value="10" ${offlineMinConfig === '10' ? 'selected' : ''}>10 Minit</option>
+          <option value="15" ${offlineMinConfig === '15' ? 'selected' : ''}>15 Minit</option>
+          <option value="20" ${offlineMinConfig === '20' ? 'selected' : ''}>20 Minit</option>
+          <option value="30" ${offlineMinConfig === '30' ? 'selected' : ''}>30 Minit</option>
+        </select>
+      </div>
+
+      <div class="setting-item">
+        <span class="setting-label">AUTO REFRESH RATE:</span>
+        <select class="setting-select" id="refreshSelect" onchange="changeAutoRefresh(this.value)">
+          <option value="15000">15 Saat</option>
+          <option value="30000" selected>30 Saat</option>
+          <option value="60000">1 Minit</option>
+          <option value="0">OFF</option>
+        </select>
+      </div>
+    </div>
 
     <!-- METRICS PANEL -->
     <div class="upstash-metrics-panel">
@@ -409,7 +480,7 @@ module.exports = async (req, res) => {
         <canvas id="barChart" height="120"></canvas>
       </div>
       <div class="chart-card">
-          <div class="chart-title">🎯 Distribusi Gems Per Akun</div>
+        <div class="chart-title">🎯 Distribusi Gems Per Akun</div>
         <canvas id="doughnutChart" height="220"></canvas>
       </div>
     </div>
@@ -428,8 +499,11 @@ module.exports = async (req, res) => {
             <div class="acc-card" data-user="${acc.user.toLowerCase()}">
               <div class="acc-header">
                 <div class="acc-user">👤 ${acc.user}</div>
-                <div class="status-pill ${acc.isOnline ? 'st-online' : 'st-offline'}">
-                  ${acc.isOnline ? '● ONLINE' : '○ OFFLINE'}
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <div class="status-pill ${acc.isOnline ? 'st-online' : 'st-offline'}">
+                    ${acc.isOnline ? '● ONLINE' : '○ OFFLINE'}
+                  </div>
+                  <button class="btn-delete-acc" onclick="deleteAccountData('${acc.user}')" title="Hapus Data Akun Ini">🗑️</button>
                 </div>
               </div>
 
@@ -491,7 +565,21 @@ module.exports = async (req, res) => {
   </div>
 
   <script>
-    setTimeout(() => { window.location.reload(); }, 30000);
+    let refreshTimer = setInterval(() => { window.location.reload(); }, 30000);
+
+    function changeAutoRefresh(val) {
+      clearInterval(refreshTimer);
+      const intervalMs = parseInt(val, 10);
+      if (intervalMs > 0) {
+        refreshTimer = setInterval(() => { window.location.reload(); }, intervalMs);
+      }
+    }
+
+    function copyWebhookLink() {
+      const urlText = document.getElementById('whUrlValue').innerText;
+      navigator.clipboard.writeText(urlText);
+      alert('✅ Webhook URL berhasil disalin!');
+    }
 
     async function toggleSystemAnalytics(el) {
       const isChecked = el.checked;
@@ -501,16 +589,33 @@ module.exports = async (req, res) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled: isChecked })
         });
-        const data = await res.json();
         if (res.ok) {
-          alert(isChecked ? '🟢 Analisis system telah DIAKTIFKAN!' : '🔴 Analisis system telah DIMATIKAN!');
+          alert(isChecked ? '🟢 Analisis system DIAKTIFKAN!' : '🔴 Analisis system DIMATIKAN!');
         } else {
           el.checked = !isChecked;
-          alert('❌ Gagal mengubah status sistem.');
         }
       } catch (e) {
         el.checked = !isChecked;
-        alert('❌ Koneksi gagal.');
+      }
+    }
+
+    async function updateOfflineThreshold(minVal) {
+      await fetch('/api/dashboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'setOfflineThreshold', offlineMin: minVal })
+      });
+      alert('✅ Threshold Alert Offline diubah ke ' + minVal + ' minit.');
+    }
+
+    async function deleteAccountData(username) {
+      if (confirm('Hapus seluruh data khusus untuk akun ' + username + '?')) {
+        await fetch('/api/dashboard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'deleteKey', key: 'stats:' + username })
+        });
+        window.location.reload();
       }
     }
 
@@ -524,18 +629,15 @@ module.exports = async (req, res) => {
     }
 
     async function confirmReset() {
-      if (confirm('⚠️ PERINGATAN: Apakah Anda yakin ingin menghapus SELURUH data akumulasi statistik di database?')) {
+      if (confirm('⚠️ PERINGATAN: Menghapus SELURUH database?')) {
         const res = await fetch('/api/dashboard', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'reset' })
         });
-        const data = await res.json();
-        if (res.ok && data.success) {
-          alert('✅ Database telah berhasil dibersihkan.');
+        if (res.ok) {
+          alert('✅ Database dibersihkan.');
           window.location.reload();
-        } else {
-          alert('❌ Gagal mereset database.');
         }
       }
     }
