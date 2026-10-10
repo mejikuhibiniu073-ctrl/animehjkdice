@@ -56,10 +56,20 @@ async function scanAndAccumulate(user, text) {
   if (!text) return;
 
   const prefix = `stats:${user}`;
+  const now = Date.now();
 
   await redisCmd('incrby', `${prefix}:totalLaporan`, 1);
   await redisCmd('expire', `${prefix}:totalLaporan`, TTL_30_MIN);
   await redisCmd('sadd', 'stats:users', user);
+
+  // Catat waktu laporan pertama jika belum ada
+  const startTime = await redisCmd('get', `${prefix}:startTime`);
+  if (!startTime) {
+    await redisCmd('set', `${prefix}:startTime`, now);
+    await redisCmd('expire', `${prefix}:startTime`, TTL_30_MIN);
+  } else {
+    await redisCmd('expire', `${prefix}:startTime`, TTL_30_MIN);
+  }
 
   if (text.includes('New Unit!')) {
     await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
@@ -197,13 +207,19 @@ module.exports = async (req, res) => {
 
         for (const user of users) {
           const prefix = `stats:${user}`;
-          const totalLaporan = (await redisCmd('get', `${prefix}:totalLaporan`)) || 0;
-          const unitMasukTas = (await redisCmd('get', `${prefix}:unitMasukTas`)) || 0;
-          const towerSelesai = (await redisCmd('get', `${prefix}:towerSelesai`)) || 0;
-          const totalGems = (await redisCmd('get', `${prefix}:totalGems`)) || 0;
-          const totalTraitReroll = (await redisCmd('get', `${prefix}:totalTraitReroll`)) || 0;
+          const totalLaporan = parseInt((await redisCmd('get', `${prefix}:totalLaporan`)) || 0, 10);
+          const unitMasukTas = parseInt((await redisCmd('get', `${prefix}:unitMasukTas`)) || 0, 10);
+          const towerSelesai = parseInt((await redisCmd('get', `${prefix}:towerSelesai`)) || 0, 10);
+          const totalGems = parseInt((await redisCmd('get', `${prefix}:totalGems`)) || 0, 10);
+          const totalTraitReroll = parseInt((await redisCmd('get', `${prefix}:totalTraitReroll`)) || 0, 10);
+          const startTime = parseInt((await redisCmd('get', `${prefix}:startTime`)) || Date.now(), 10);
           const unitsReceived = (await redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1)) || [];
           const potionsRaw = (await redisCmd('hgetall', `${prefix}:potions`)) || [];
+
+          // Hitung Durasi dan Rate
+          const durationHours = Math.max((Date.now() - startTime) / (1000 * 60 * 60), 0.01);
+          const gemsPerHour = Math.round(totalGems / durationHours);
+          const traitPerHour = Math.round(totalTraitReroll / durationHours);
 
           const potionsObj = {};
           if (Array.isArray(potionsRaw)) {
@@ -235,6 +251,9 @@ module.exports = async (req, res) => {
             `  • Tower Selesai: *${towerSelesai}*\n` +
             `  • Total Gems: *x${totalGems}*\n` +
             `  • Total Trait Reroll: *x${totalTraitReroll}*\n` +
+            `  📈 *Estimasi Rate / Jam:*\n` +
+            `    • ~${gemsPerHour} Gems/Jam\n` +
+            `    • ~${traitPerHour} Trait/Jam\n` +
             `  *Daftar Unit Diterima:*\n${unitList}\n` +
             `  *Item / Potion Diterima:*\n${itemList}\n────────────────\n`;
         }
