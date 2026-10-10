@@ -30,7 +30,9 @@ async function sendTelegramAlert(message) {
         parse_mode: 'HTML'
       })
     });
-  } catch (e) {}
+  } catch (e) {
+    console.error('Telegram Error:', e);
+  }
 }
 
 function cleanStr(str) {
@@ -68,7 +70,6 @@ module.exports = async (req, res) => {
       await redisCmd('incr', 'global:total_commands');
       await redisCmd('incrby', 'global:total_bytes', byteLength);
 
-      // Kumpulkan seluruh teks dari payload Discord
       let textChunks = [];
       if (body.content) textChunks.push(body.content);
 
@@ -89,7 +90,7 @@ module.exports = async (req, res) => {
 
       const fullText = textChunks.join('\n');
 
-      // 1. EKSTRAKSI USERNAME (Format: Username: Roblox Script)
+      // 1. Ekstrak Username (Format: Username: NamaAkun)
       let username = 'Player';
       const userMatch = fullText.match(/Username\s*:\s*([^\r\n]+)/i);
       if (userMatch) {
@@ -115,51 +116,48 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // 2. EKSTRAKSI TOWER (Format: Name: Shadow Tower + Floor Reached: 150)
+      // 2. Ekstrak Tower (Format Pesan Telegram: /tower NamaAkun | NamaTower | Floor)
       if (/Tower Completed!/i.test(fullText) || /Tower/i.test(fullText)) {
         const towerNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
         const floorMatch = fullText.match(/Floor Reached\s*:\s*([^\r\n]+)/i);
 
         if (towerNameMatch) {
-          let towerDisplayName = cleanStr(towerNameMatch[1]);
-          if (floorMatch) {
-            towerDisplayName += ` (Floor ${cleanStr(floorMatch[1])})`;
-          }
+          const tName = cleanStr(towerNameMatch[1]);
+          const fNumber = floorMatch ? cleanStr(floorMatch[1]) : '1';
+          const towerDisplayName = `${tName} (Floor ${fNumber})`;
 
           await redisCmd('rpush', `${prefix}:towerList`, towerDisplayName);
           await redisCmd('incr', `${prefix}:towerSelesai`);
 
+          // Format notifikasi Telegram dengan perintah "/" dan pemisah "|"
           await sendTelegramAlert(
-            `🏆 <b>TOWER COMPLETED!</b>\n\n` +
-            `👤 Akun: <b>${username}</b>\n` +
-            `🏰 Tower: <b>${towerDisplayName}</b>`
+            `/tower 🏆\n\n` +
+            `<b>${username}</b> | <b>${tName}</b> | <b>Floor ${fNumber}</b>`
           );
         }
       }
 
-      // 3. EKSTRAKSI UNIT (Format: New Unit! / HIGH-VALUE DROP DETECTED -> Name: Ruby Huge Dio)
+      // 3. Ekstrak Unit (Format Pesan Telegram: /unit NamaAkun | NamaUnit)
       if (/New Unit!/i.test(fullText) || /HIGH-VALUE DROP/i.test(fullText)) {
         const unitNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
         const rarityMatch = fullText.match(/Rarity\s*:\s*([^\r\n]+)/i);
 
         if (unitNameMatch) {
-          let unitDisplayName = cleanStr(unitNameMatch[1]);
-          if (rarityMatch) {
-            unitDisplayName += ` [${cleanStr(rarityMatch[1])}]`;
-          }
+          const uName = cleanStr(unitNameMatch[1]);
+          const rarity = rarityMatch ? cleanStr(rarityMatch[1]) : '';
+          const unitDisplayName = rarity ? `${uName} [${rarity}]` : uName;
 
           await redisCmd('rpush', `${prefix}:unitsReceived`, unitDisplayName);
 
+          // Format notifikasi Telegram dengan perintah "/" dan pemisah "|"
           await sendTelegramAlert(
-            `🚨 <b>[HIGH-VALUE DROP DETECTED]</b> 🚨\n\n` +
-            `👤 Akun: <b>${username}</b>\n` +
-            `🎁 Unit: <b>${unitDisplayName}</b>`
+            `/unit 🚨\n\n` +
+            `<b>${username}</b> | <b>${unitDisplayName}</b>`
           );
         }
       }
 
-      // 4. EKSTRAKSI DROPS (Gems, Trait Reroll, Potions & Buff Items)
-      // Format: NamaItem: xJumlah (Contoh: Gems: x50, Shadow Income I: x1)
+      // 4. Ekstrak Item & Drops Game Anime Dice Roblox (Gems, Trait Reroll, Buff Potions/Shadow Drops)
       const dropMatches = [...fullText.matchAll(/([a-zA-Z0-9\s]+)\s*:\s*x([\d,.]+)/gi)];
 
       for (const match of dropMatches) {
@@ -172,7 +170,7 @@ module.exports = async (req, res) => {
           } else if (/^Trait Reroll$/i.test(itemName)) {
             await redisCmd('incrby', `${prefix}:totalTraitReroll`, qty);
           } else {
-            // Item / Potions / Buffs lainnya
+            // Menyimpan item/potion bawaan Anime Dice (seperti Shadow Income I, Shadow Luck III, Speed, dll.)
             await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
           }
         }
