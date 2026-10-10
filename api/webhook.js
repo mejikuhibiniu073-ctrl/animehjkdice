@@ -119,9 +119,10 @@ async function scanAndAccumulate(user, text) {
       const mutationMatch = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
       const rarityMatch = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
 
+      // Menaruh Rarity tepat di sebelah Nama Unit
       let unitInfo = rawUnitName;
-      if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
       if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
+      if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
 
       await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
       await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
@@ -174,11 +175,9 @@ function checkRareAlert(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
 
-  // Deteksi Rarity > 1/500qd (seperti 1/1qi, 1/1sx, 1/1sp, dst.)
   const hasHigherUnitPrefix = /1\/\d+(\.\d+)?(qi|sx|sp|oc|no|dc)/i.test(lower);
   if (hasHigherUnitPrefix) return true;
 
-  // Deteksi Rarity QD di atas 500 (misal: 1/501qd hingga 1/999qd)
   const qdMatch = lower.match(/1\/(\d+(\.\d+)?)qd/i);
   if (qdMatch) {
     const qdVal = parseFloat(qdMatch[1]);
