@@ -198,35 +198,6 @@ function parseDiscordEmbed(embed) {
   return parts.join('\n\n');
 }
 
-function formatCategorizedItems(potionsObj) {
-  const keys = Object.keys(potionsObj).sort((a, b) => a.localeCompare(b));
-  if (keys.length === 0) return '  *Item / Potion Diterima:*\n    • Belum ada';
-
-  const potions = [];
-  const keysTickets = [];
-  const materials = [];
-
-  for (const item of keys) {
-    const lower = item.toLowerCase();
-    const formatted = `    • ${item}: x${potionsObj[item]}`;
-
-    if (lower.includes('potion') || lower.includes('income') || lower.includes('luck') || lower.includes('boost') || lower.includes('exp')) {
-      potions.push(formatted);
-    } else if (lower.includes('key') || lower.includes('ticket') || lower.includes('pass')) {
-      keysTickets.push(formatted);
-    } else {
-      materials.push(formatted);
-    }
-  }
-
-  let output = '';
-  if (potions.length > 0) output += `  🧪 *Potions & Boosts:*\n${potions.join('\n')}\n`;
-  if (keysTickets.length > 0) output += `  🔑 *Keys & Tickets:*\n${keysTickets.join('\n')}\n`;
-  if (materials.length > 0) output += `  📦 *Chests & Materials:*\n${materials.join('\n')}\n`;
-
-  return output.trimEnd();
-}
-
 async function sendTelegramMessage(chatId, text) {
   const url = `${CONFIG.TELEGRAM_BASE_URL}${CONFIG.BOT_TOKEN}/sendMessage`;
   try {
@@ -254,6 +225,12 @@ async function sendTelegramMessage(chatId, text) {
 }
 
 module.exports = async (req, res) => {
+  // Cek Status Analisis ON/OFF
+  const systemStatus = await redisCmd('get', 'system:analytics_status');
+  if (systemStatus === 'disabled') {
+    return res.status(200).json({ status: 'offline', message: 'System Analytics is OFF' });
+  }
+
   if (req.method !== 'POST') {
     return res.status(200).json({ status: 'online', message: 'Webhook Gateway Active' });
   }
@@ -267,117 +244,6 @@ module.exports = async (req, res) => {
       } catch {
         payload = { content: payload };
       }
-    }
-
-    if (payload && payload.message) {
-      const chatId = payload.message.chat.id;
-      const userText = (payload.message.text || '').trim();
-
-      if (userText === '/vel') {
-        const welcomeText = `Selamat datang di Roblox Webhook Monitoring Bot!\n\n` +
-          `Berikut adalah daftar perintah yang tersedia:\n` +
-          `• /stats - Menampilkan akumulasi statistik dan estimasi rate per jam\n` +
-          `• /reset - Mengosongkan seluruh data penyimpanan database`;
-
-        await sendTelegramMessage(chatId, welcomeText);
-        return res.status(200).json({ success: true });
-      }
-
-      if (userText === '/reset') {
-        await redisCmd('set', 'system:pending_reset', 'true');
-        await redisCmd('expire', 'system:pending_reset', 300);
-
-        const alertText = `⚠️ *PERINGATAN KONFIRMASI RESET*\n\n` +
-          `Apakah Anda yakin ingin menghapus seluruh data statistik dan mengosongkan penyimpanan database?\n\n` +
-          `• Ketik /confirm untuk melanjutkan penghapusan.\n` +
-          `• Ketik /false untuk membatalkan.`;
-
-        await sendTelegramMessage(chatId, alertText);
-        return res.status(200).json({ success: true });
-      }
-
-      if (userText === '/confirm') {
-        const isPending = await redisCmd('get', 'system:pending_reset');
-
-        if (isPending) {
-          await redisCmd('flushall');
-          await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
-        } else {
-          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset terlebih dahulu.`);
-        }
-        return res.status(200).json({ success: true });
-      }
-
-      if (userText === '/false') {
-        await redisCmd('del', 'system:pending_reset');
-        await sendTelegramMessage(chatId, `✅ *Dibatalkan*\nProses penghapusan database telah dibatalkan.`);
-        return res.status(200).json({ success: true });
-      }
-
-      if (userText === '/stats') {
-        let users = await redisCmd('smembers', 'stats:users');
-        if (!Array.isArray(users)) users = users ? [users] : [];
-
-        if (users.length === 0) {
-          await sendTelegramMessage(chatId, `*Hasil Akumulasi Scanning Bot (Sesi 5 Jam)*\nBelum ada data statistik yang masuk.`);
-          return res.status(200).json({ success: true });
-        }
-
-        let reportText = `*Hasil Akumulasi Scanning Bot (Sesi 5 Jam)*\nWaktu Cetak: ${getCurrentTimeWIB()}\n────────────────\n`;
-
-        for (const user of users) {
-          const prefix = `stats:${user}`;
-          const totalLaporan = parseInt((await redisCmd('get', `${prefix}:totalLaporan`)) || 0, 10);
-          const unitMasukTas = parseInt((await redisCmd('get', `${prefix}:unitMasukTas`)) || 0, 10);
-          const towerSelesai = parseInt((await redisCmd('get', `${prefix}:towerSelesai`)) || 0, 10);
-          const totalGems = parseInt((await redisCmd('get', `${prefix}:totalGems`)) || 0, 10);
-          const totalTraitReroll = parseInt((await redisCmd('get', `${prefix}:totalTraitReroll`)) || 0, 10);
-          const startTime = parseInt((await redisCmd('get', `${prefix}:startTime`)) || Date.now(), 10);
-
-          let unitsReceived = await redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1);
-          if (!Array.isArray(unitsReceived)) unitsReceived = unitsReceived ? [unitsReceived] : [];
-
-          const potionsRaw = (await redisCmd('hgetall', `${prefix}:potions`)) || [];
-
-          const durationHours = Math.max((Date.now() - startTime) / (1000 * 60 * 60), 0.01);
-          const gemsPerHour = Math.round(totalGems / durationHours);
-          const traitPerHour = Math.round(totalTraitReroll / durationHours);
-
-          const potionsObj = {};
-          if (Array.isArray(potionsRaw)) {
-            for (let i = 0; i < potionsRaw.length; i += 2) {
-              potionsObj[potionsRaw[i]] = potionsRaw[i + 1];
-            }
-          } else if (typeof potionsRaw === 'object' && potionsRaw !== null) {
-            Object.assign(potionsObj, potionsRaw);
-          }
-
-          let unitList = 'Belum ada';
-          if (unitsReceived.length > 0) {
-            unitList = unitsReceived.map(u => `    • ${u}`).join('\n');
-          }
-
-          const categorizedItemsText = formatCategorizedItems(potionsObj);
-
-          reportText += `👤 *Akun: ${user}*\n` +
-            `  • Total Laporan Diproses: *${totalLaporan}*\n` +
-            `  • Unit Masuk Tas: *${unitMasukTas}*\n` +
-            `  • Tower Selesai: *${towerSelesai}*\n` +
-            `  • Total Gems: *x${totalGems}*\n` +
-            `  • Total Trait Reroll: *x${totalTraitReroll}*\n` +
-            `  📈 *Estimasi Rate / Jam:*\n` +
-            `    • ~${gemsPerHour} Gems/Jam\n` +
-            `    • ~${traitPerHour} Trait/Jam\n` +
-            `  *Daftar Unit Diterima:*\n${unitList}\n` +
-            `${categorizedItemsText}\n────────────────\n`;
-        }
-
-        await sendTelegramMessage(chatId, reportText);
-        return res.status(200).json({ success: true });
-      }
-
-      await sendTelegramMessage(chatId, `Pesan diterima: "${payload.message.text}"`);
-      return res.status(200).json({ success: true });
     }
 
     let fullTextToScan = '';
