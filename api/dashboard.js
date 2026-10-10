@@ -41,11 +41,10 @@ function formatUptime(ms) {
   return days > 0 ? `${days}h ${hours}j${minutes}m` : `${hours}j${minutes}m`;
 }
 
-// FUNGSI PEMBERSIH UNTUK TAMPILAN UI
 function cleanUidata(str) {
   if (!str) return '';
   return str
-    .replace(/[\*_~`]/g, '')
+    .replace(/[\*_~`#]/g, '')
     .replace(/Completed!/gi, '')
     .replace(/Name:/gi, '')
     .replace(/Floor Reached/gi, '')
@@ -170,7 +169,6 @@ module.exports = async (req, res) => {
       const rawUnits = Array.isArray(units.result) ? units.result : (units.result ? [units.result] : []);
       const rawTowers = Array.isArray(towers.result) ? towers.result : (towers.result ? [towers.result] : []);
 
-      // BERSIHKAN TEKS BUG DI UI
       const unitsReceived = rawUnits.map(u => cleanUidata(u)).filter(Boolean);
       const towerList = rawTowers.map(t => cleanUidata(t)).filter(Boolean);
 
