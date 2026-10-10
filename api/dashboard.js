@@ -1,6 +1,5 @@
 const CONFIG = {
   DASHBOARD_USER: process.env.DASHBOARD_USER,
-  DASHBOARD_PASS: process.env.DASHBOARD_PASS,
   REDIS_URL: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
   REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
 };
@@ -41,56 +40,56 @@ function formatUptime(ms) {
 module.exports = async (req, res) => {
   const cookies = parseCookies(req);
 
-  if (req.method === 'POST' && req.body?.action) {
-    const { action, key, offlineMin, username, password } = req.body;
-
-    if (action === 'logout') {
-      res.setHeader('Set-Cookie', 'auth=; Path=/; HttpOnly; Max-Age=0');
-      return res.status(200).json({ success: true });
-    }
-
-    if (action === 'login') {
-      if (username === CONFIG.DASHBOARD_USER && password === CONFIG.DASHBOARD_PASS) {
-        res.setHeader('Set-Cookie', 'auth=true; Path=/; HttpOnly; Max-Age=86400');
-        return res.status(200).json({ success: true });
-      }
-      return res.status(401).json({ success: false, message: 'Username atau Password salah!' });
-    }
-
-    if (cookies.auth !== 'true') return res.status(401).json({ success: false });
-
-    // Action Reset: Hanya hapus data statistik akun (COST, BANDWIDTH & COMMANDS AMAN)
-    if (action === 'reset') {
-      const users = (await redisCmd('smembers', 'stats:users')).result || [];
-      if (Array.isArray(users)) {
-        await Promise.all(users.map(async (u) => {
-          const keys = ['totalLaporan', 'unitMasukTas', 'towerSelesai', 'totalGems', 'totalTraitReroll', 'startTime', 'lastSeen', 'unitsReceived', 'towerList', 'potions'];
-          await Promise.all(keys.map(k => redisCmd('del', `stats:${u}:${k}`)));
-        }));
-      }
-      await redisCmd('del', 'stats:users');
-      return res.status(200).json({ success: true });
-    }
-
-    if (action === 'deleteKey' && key) {
-      await redisCmd('del', key);
-      if (key.startsWith('stats:')) await redisCmd('srem', 'stats:users', key.replace('stats:', '').split(':')[0]);
-      return res.status(200).json({ success: true });
-    }
-
-    if (action === 'setOfflineThreshold' && offlineMin) {
-      await redisCmd('set', 'system:offline_threshold_min', offlineMin);
-      return res.status(200).json({ success: true });
-    }
-  }
-
-  // Tampilan Login Form jika unauthenticated
+  // PROTEKSI AKSES: Redirect ke /api/login jika belum login
   if (cookies.auth !== 'true') {
-    res.setHeader('Content-Type', 'text/html');
-    return res.status(200).send(`<!DOCTYPE html><html lang="id"><head><meta charset="UTF-8"><title>Login</title><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap" rel="stylesheet"><style>*{margin:0;padding:0;box-sizing:border-box;font-family:'Plus Jakarta Sans',sans-serif;}body{background:#07090e;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;}.card{background:rgba(18,26,43,0.85);border:1px solid rgba(255,255,255,0.1);padding:2.5rem;border-radius:20px;width:100%;max-width:400px;}input{width:100%;background:rgba(8,12,20,0.8);border:1px solid rgba(255,255,255,0.1);padding:0.75rem;margin:0.5rem 0 1.2rem;color:#fff;border-radius:10px;outline:none;}button{width:100%;background:#38bdf8;border:none;padding:0.85rem;border-radius:10px;font-weight:700;cursor:pointer;}</style></head><body><div class="card"><h2>Dashboard Login</h2><form id="lf"><label>Username</label><input type="text" id="u" required><label>Password</label><input type="password" id="p" required><button type="submit">Masuk</button></form></div><script>document.getElementById('lf').onclick=async(e)=>{e.preventDefault();const res=await fetch('/api/dashboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'login',username:u.value,password:p.value})});if(res.ok)location.reload();else alert('Login Gagal');}</script></body></html>`);
+    res.writeHead(302, { Location: '/api/login' });
+    return res.end();
   }
 
-  // Fetch Data Redis Paralel
+  // Aksi Logout
+  if (req.method === 'POST' && req.body?.action === 'logout') {
+    res.setHeader('Set-Cookie', [
+      'auth=; Path=/; HttpOnly; Max-Age=0',
+      'auth_user=; Path=/; HttpOnly; Max-Age=0',
+      'auth_role=; Path=/; HttpOnly; Max-Age=0'
+    ]);
+    return res.status(200).json({ success: true, redirect: '/api/login' });
+  }
+
+  // Aksi Reset Database Statistik Akun (Data Metrik Upstash Tetap Aman)
+  if (req.method === 'POST' && req.body?.action === 'reset') {
+    const users = (await redisCmd('smembers', 'stats:users')).result || [];
+    if (Array.isArray(users)) {
+      await Promise.all(users.map(async (u) => {
+        const keys = ['totalLaporan', 'unitMasukTas', 'towerSelesai', 'totalGems', 'totalTraitReroll', 'startTime', 'lastSeen', 'unitsReceived', 'towerList', 'potions'];
+        await Promise.all(keys.map(k => redisCmd('del', `stats:${u}:${k}`)));
+      }));
+    }
+    await redisCmd('del', 'stats:users');
+    return res.status(200).json({ success: true });
+  }
+
+  // Aksi Hapus Key Spesifik Akun
+  if (req.method === 'POST' && req.body?.action === 'deleteKey' && req.body?.key) {
+    await redisCmd('del', req.body.key);
+    if (req.body.key.startsWith('stats:')) {
+      await redisCmd('srem', 'stats:users', req.body.key.replace('stats:', '').split(':')[0]);
+    }
+    return res.status(200).json({ success: true });
+  }
+
+  // Aksi Set Threshold Offline
+  if (req.method === 'POST' && req.body?.action === 'setOfflineThreshold' && req.body?.offlineMin) {
+    await redisCmd('set', 'system:offline_threshold_min', req.body.offlineMin);
+    return res.status(200).json({ success: true });
+  }
+
+  // INFORMASI IDENTITAS USER
+  const currentUser = decodeURIComponent(cookies.auth_user || 'Admin');
+  const currentRole = cookies.auth_role || 'user';
+  const isAdmin = currentRole === 'admin' || currentUser === CONFIG.DASHBOARD_USER;
+
+  // FETCH DATA DASHBOARD DARI REDIS
   const [sysStatusRes, offlineMinRes, cmdRes, bytesRes, startRes, usersRes] = await Promise.all([
     redisCmd('get', 'system:analytics_status'),
     redisCmd('get', 'system:offline_threshold_min'),
@@ -113,7 +112,6 @@ module.exports = async (req, res) => {
 
   let totalGemsGlobal = 0, totalTraitGlobal = 0, totalUnitsGlobal = 0;
 
-  // Process data akun paralel
   const accountsData = await Promise.all(users.map(async (user) => {
     const prefix = `stats:${user}`;
     const [laporan, unitTas, tower, gems, trait, start, last, units, towers, potionsRaw] = await Promise.all([
@@ -156,10 +154,22 @@ module.exports = async (req, res) => {
     };
   }));
 
+  // FETCH DATA SELURUH USER UNTUK TAB MANAGEMENT ADMIN
+  let allRegisteredUsers = [];
+  if (isAdmin) {
+    const allUsersList = (await redisCmd('smembers', 'users:all')).result || [];
+    if (Array.isArray(allUsersList)) {
+      allRegisteredUsers = await Promise.all(allUsersList.map(async (u) => {
+        const raw = await redisCmd('get', `user:${u}`);
+        return raw ? JSON.parse(raw) : null;
+      }));
+      allRegisteredUsers = allRegisteredUsers.filter(Boolean);
+    }
+  }
+
   const hostHeader = req.headers.host || 'animehjkdice.vercel.app';
   const webhookUrl = `${req.headers['x-forwarded-proto'] || 'https'}://${hostHeader}/api/webhook`;
 
-  // Tampilan Dashboard Lengkap (Styling & Fitur Utuh)
   res.setHeader('Content-Type', 'text/html');
   return res.status(200).send(`
 <!DOCTYPE html>
@@ -179,6 +189,14 @@ module.exports = async (req, res) => {
     .logo{width:46px;height:46px;background:linear-gradient(135deg,var(--cyan),var(--purple));border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:800;}
     .btn{background:var(--card-bg);border:1px solid var(--card-border);color:var(--text);padding:0.6rem 1rem;border-radius:10px;font-weight:600;font-size:0.85rem;cursor:pointer;}
     .btn-danger{border-color:rgba(244,63,94,0.3);color:var(--red);}
+
+    .user-badge-admin { color:#38bdf8; font-weight:800; font-size:1rem; text-shadow: 0 0 10px #38bdf8, 0 0 20px #38bdf8; padding:0.4rem 0.8rem; background:rgba(56,189,248,0.1); border-radius:10px; border:1px solid rgba(56,189,248,0.3); }
+    .user-badge-user { color:#ffffff; font-weight:700; font-size:1rem; padding:0.4rem 0.8rem; background:rgba(255,255,255,0.05); border-radius:10px; border:1px solid rgba(255,255,255,0.1); }
+
+    .nav-tabs { display:flex; gap:1rem; margin-bottom:1.5rem; border-bottom:1px solid var(--card-border); padding-bottom:0.75rem; }
+    .nav-btn { background:none; border:none; color:var(--muted); font-size:1rem; font-weight:700; cursor:pointer; padding:0.4rem 0.8rem; border-radius:8px; }
+    .nav-btn.active { color:var(--cyan); background:rgba(56,189,248,0.1); }
+
     .webhook-card{background:rgba(18,26,43,0.9);border:1px solid var(--card-border);border-radius:16px;padding:1.25rem;margin-bottom:1.5rem;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;}
     .wh-box{font-family:'JetBrains Mono',monospace;font-size:0.85rem;background:rgba(8,12,20,0.8);border:1px solid var(--card-border);padding:0.5rem 1rem;border-radius:10px;color:var(--cyan);flex:1;}
     .btn-copy{background:linear-gradient(135deg,var(--cyan),#0284c7);color:#fff;border:none;padding:0.6rem 1.2rem;border-radius:10px;font-weight:700;cursor:pointer;}
@@ -205,6 +223,14 @@ module.exports = async (req, res) => {
     .status-pill{font-size:0.75rem;font-weight:700;padding:0.25rem 0.6rem;border-radius:6px;}
     .st-online{background:rgba(52,211,153,0.15);color:var(--green);border:1px solid rgba(52,211,153,0.3);}
     .st-offline{background:rgba(244,63,94,0.15);color:var(--red);border:1px solid rgba(244,63,94,0.3);}
+
+    .admin-table { width:100%; border-collapse:collapse; margin-top:1rem; }
+    .admin-table th, .admin-table td { padding:0.8rem; text-align:left; border-bottom:1px solid var(--card-border); font-size:0.85rem; }
+    .admin-table th { color:var(--muted); font-weight:700; background:rgba(8,12,20,0.6); }
+    .btn-action { padding:0.3rem 0.6rem; border-radius:6px; font-weight:700; font-size:0.75rem; cursor:pointer; border:none; margin-right:0.3rem; }
+    .btn-acc { background:#34d399; color:#000; }
+    .btn-rej { background:#f43f5e; color:#fff; }
+    .btn-ban { background:#fbbf24; color:#000; }
   </style>
 </head>
 <body>
@@ -212,137 +238,229 @@ module.exports = async (req, res) => {
     <header>
       <div style="display:flex;align-items:center;gap:1rem;">
         <div class="logo">🎲</div>
-        <div><h1 style="font-size:1.6rem;font-weight:800;">Analytics & Real-Time Control</h1><p style="font-size:0.85rem;color:var(--muted);">Real-Time Upstash Redis Database Center</p></div>
+        <div><h1 style="font-size:1.6rem;font-weight:800;">Analytics Center</h1><p style="font-size:0.85rem;color:var(--muted);">Control & User Management Panel</p></div>
       </div>
-      <div style="display:flex;gap:0.75rem;">
-        <button class="btn" onclick="location.reload()">🔄 Refresh /stats</button>
-        <button class="btn btn-danger" onclick="confirmReset()">🗑️ /reset Database</button>
+      <div style="display:flex;align-items:center;gap:1rem;">
+        <div class="${isAdmin ? 'user-badge-admin' : 'user-badge-user'}">
+          👤 ${currentUser} ${isAdmin ? '[ADMIN]' : '[USER]'}
+        </div>
+        ${isAdmin ? '<button class="btn btn-danger" onclick="confirmReset()">🗑️ /reset</button>' : ''}
         <button class="btn" onclick="logout()">🚪 Logout</button>
       </div>
     </header>
 
-    <div class="webhook-card">
-      <div style="font-weight:700;font-size:0.9rem;color:var(--muted);">WEBHOOK GATEWAY URL:</div>
-      <div class="wh-box" id="whUrlValue">${webhookUrl}</div>
-      <button class="btn-copy" onclick="copyWebhookLink()">Salin Webhook URL</button>
+    <div class="nav-tabs">
+      <button class="nav-btn active" onclick="switchTab('analytics')">📊 Analytics Dashboard</button>
+      ${isAdmin ? '<button class="nav-btn" onclick="switchTab(\'userAdmin\')">⚙️ Pengaturan & Manajemen User</button>' : ''}
     </div>
 
-    <div class="settings-panel">
-      <div style="display:flex;align-items:center;gap:0.8rem;">
-        <span style="font-size:0.85rem;font-weight:700;color:var(--muted);">ANALYSIS SYSTEM:</span>
-        <label class="switch"><input type="checkbox" ${isAnalyticsOn ? 'checked' : ''} onchange="toggleSystemAnalytics(this)"><span class="slider"></span></label>
+    <!-- TAB 1: ANALYTICS DASHBOARD -->
+    <div id="analyticsTab">
+      <div class="webhook-card">
+        <div style="font-weight:700;font-size:0.9rem;color:var(--muted);">WEBHOOK GATEWAY URL:</div>
+        <div class="wh-box" id="whUrlValue">${webhookUrl}</div>
+        <button class="btn-copy" onclick="copyWebhookLink()">Salin Webhook URL</button>
       </div>
-      <div style="display:flex;align-items:center;gap:0.8rem;">
-        <span style="font-size:0.85rem;font-weight:700;color:var(--muted);">LAMA ONLINE SYSTEM:</span>
-        <span style="font-family:'JetBrains Mono';font-weight:800;color:var(--green);background:rgba(52,211,153,0.1);padding:0.3rem 0.6rem;border-radius:6px;border:1px solid rgba(52,211,153,0.3);">${systemUptimeText}</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:0.8rem;">
-        <span style="font-size:0.85rem;font-weight:700;color:var(--muted);">OFFLINE THRESHOLD:</span>
-        <select style="background:rgba(18,26,43,0.8);border:1px solid var(--card-border);color:#fff;padding:0.4rem;border-radius:8px;" onchange="updateOfflineThreshold(this.value)">
-          <option value="10" ${offlineMinConfig === '10' ? 'selected' : ''}>10 Menit</option>
-          <option value="15" ${offlineMinConfig === '15' ? 'selected' : ''}>15 Menit</option>
-          <option value="20" ${offlineMinConfig === '20' ? 'selected' : ''}>20 Menit</option>
-          <option value="30" ${offlineMinConfig === '30' ? 'selected' : ''}>30 Menit</option>
-        </select>
-      </div>
-    </div>
 
-    <!-- METRICS PANEL UPSTASH (DIAMANKAN SAAT /RESET) -->
-    <div class="metrics-panel">
-      <div class="metric-box">
-        <div style="font-size:0.75rem;font-weight:700;color:var(--muted);">WEBHOOK LATENCY</div>
-        <div style="font-size:1.3rem;font-weight:800;color:var(--green);margin:0.4rem 0;">${realTimeMs} ms</div>
-      </div>
-      <div class="metric-box">
-        <div style="font-size:0.75rem;font-weight:700;color:var(--muted);">COMMANDS</div>
-        <div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">${globalCommands > 1000 ? (globalCommands/1000).toFixed(1) + ' rb' : globalCommands}</div>
-      </div>
-      <div class="metric-box">
-        <div style="font-size:0.75rem;font-weight:700;color:var(--muted);">BANDWIDTH</div>
-        <div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">${(globalBytes / 1024).toFixed(0)} KB</div>
-      </div>
-      <div class="metric-box">
-        <div style="font-size:0.75rem;font-weight:700;color:var(--muted);">STORAGE</div>
-        <div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">${globalBytes} B</div>
-      </div>
-      <div class="metric-box">
-        <div style="font-size:0.75rem;font-weight:700;color:var(--muted);">COST</div>
-        <div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">$0.00</div>
-      </div>
-    </div>
-
-    <div class="stats-grid">
-      <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Akun Aktif</div><div style="font-size:2rem;font-weight:800;">${users.length}</div></div>
-      <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Total Gems Database</div><div style="font-size:2rem;font-weight:800;color:var(--cyan);">x${totalGemsGlobal.toLocaleString('id-ID')}</div></div>
-      <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Total Trait Reroll</div><div style="font-size:2rem;font-weight:800;color:var(--purple);">x${totalTraitGlobal.toLocaleString('id-ID')}</div></div>
-      <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Total Unit Diterima</div><div style="font-size:2rem;font-weight:800;">${totalUnitsGlobal}</div></div>
-    </div>
-
-    <div class="charts-grid">
-      <div class="chart-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;font-weight:700;">
-          <span>⚡ Live Webhook Latency (ms)</span>
-          <span style="color:var(--green);font-size:0.8rem;">${realTimeMs} ms</span>
+      <div class="settings-panel">
+        <div style="display:flex;align-items:center;gap:0.8rem;">
+          <span style="font-size:0.85rem;font-weight:700;color:var(--muted);">ANALYSIS SYSTEM:</span>
+          <label class="switch"><input type="checkbox" ${isAnalyticsOn ? 'checked' : ''} ${isAdmin ? 'onchange="toggleSystemAnalytics(this)"' : 'disabled'}><span class="slider"></span></label>
         </div>
-        <canvas id="latencyChart" height="120"></canvas>
+        <div style="display:flex;align-items:center;gap:0.8rem;">
+          <span style="font-size:0.85rem;font-weight:700;color:var(--muted);">LAMA ONLINE SYSTEM:</span>
+          <span style="font-family:'JetBrains Mono';font-weight:800;color:var(--green);background:rgba(52,211,153,0.1);padding:0.3rem 0.6rem;border-radius:6px;border:1px solid rgba(52,211,153,0.3);">${systemUptimeText}</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;">
+          <span style="font-size:0.85rem;font-weight:700;color:var(--muted);">OFFLINE THRESHOLD:</span>
+          <select style="background:rgba(18,26,43,0.8);border:1px solid var(--card-border);color:#fff;padding:0.4rem;border-radius:8px;" ${isAdmin ? 'onchange="updateOfflineThreshold(this.value)"' : 'disabled'}>
+            <option value="10" ${offlineMinConfig === '10' ? 'selected' : ''}>10 Menit</option>
+            <option value="15" ${offlineMinConfig === '15' ? 'selected' : ''}>15 Menit</option>
+            <option value="20" ${offlineMinConfig === '20' ? 'selected' : ''}>20 Menit</option>
+            <option value="30" ${offlineMinConfig === '30' ? 'selected' : ''}>30 Menit</option>
+          </select>
+        </div>
       </div>
-      <div class="chart-card">
-        <div style="margin-bottom:1rem;font-weight:700;">🎯 Distribusi Gems Per Akun</div>
-        <canvas id="doughnutChart" height="220"></canvas>
-      </div>
-    </div>
 
-    <div class="cards-wrapper">
-      ${accountsData.map(acc => {
-        const itemKeys = Object.keys(acc.potionsObj);
-        return `
-          <div class="acc-card">
-            <div class="acc-header">
-              <div style="font-size:1.1rem;font-weight:800;color:var(--cyan);">👤 ${acc.user}</div>
-              <div style="display:flex;align-items:center;gap:0.5rem;">
-                <div class="status-pill ${acc.isOnline ? 'st-online' : 'st-offline'}">${acc.isOnline ? '● ONLINE' : '○ OFFLINE'}</div>
-                <button style="background:none;border:none;cursor:pointer;color:var(--red);" onclick="deleteAccountData('${acc.user}')">🗑️</button>
+      <div class="metrics-panel">
+        <div class="metric-box"><div style="font-size:0.75rem;font-weight:700;color:var(--muted);">WEBHOOK LATENCY</div><div style="font-size:1.3rem;font-weight:800;color:var(--green);margin:0.4rem 0;">${realTimeMs} ms</div></div>
+        <div class="metric-box"><div style="font-size:0.75rem;font-weight:700;color:var(--muted);">COMMANDS</div><div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">${globalCommands > 1000 ? (globalCommands/1000).toFixed(1) + ' rb' : globalCommands}</div></div>
+        <div class="metric-box"><div style="font-size:0.75rem;font-weight:700;color:var(--muted);">BANDWIDTH</div><div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">${(globalBytes / 1024).toFixed(0)} KB</div></div>
+        <div class="metric-box"><div style="font-size:0.75rem;font-weight:700;color:var(--muted);">STORAGE</div><div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">${globalBytes} B</div></div>
+        <div class="metric-box"><div style="font-size:0.75rem;font-weight:700;color:var(--muted);">COST</div><div style="font-size:1.3rem;font-weight:800;margin:0.4rem 0;">$0.00</div></div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Akun Aktif</div><div style="font-size:2rem;font-weight:800;">${users.length}</div></div>
+        <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Total Gems Database</div><div style="font-size:2rem;font-weight:800;color:var(--cyan);">x${totalGemsGlobal.toLocaleString('id-ID')}</div></div>
+        <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Total Trait Reroll</div><div style="font-size:2rem;font-weight:800;color:var(--purple);">x${totalTraitGlobal.toLocaleString('id-ID')}</div></div>
+        <div class="stat-card"><div style="font-size:0.8rem;color:var(--muted);">Total Unit Diterima</div><div style="font-size:2rem;font-weight:800;">${totalUnitsGlobal}</div></div>
+      </div>
+
+      <div class="charts-grid">
+        <div class="chart-card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem;font-weight:700;">
+            <span>⚡ Live Webhook Latency (ms)</span>
+            <span style="color:var(--green);font-size:0.8rem;">${realTimeMs} ms</span>
+          </div>
+          <canvas id="latencyChart" height="120"></canvas>
+        </div>
+        <div class="chart-card">
+          <div style="margin-bottom:1rem;font-weight:700;">🎯 Distribusi Gems Per Akun</div>
+          <canvas id="doughnutChart" height="220"></canvas>
+        </div>
+      </div>
+
+      <div class="cards-wrapper">
+        ${accountsData.map(acc => {
+          const itemKeys = Object.keys(acc.potionsObj);
+          return `
+            <div class="acc-card">
+              <div class="acc-header">
+                <div style="font-size:1.1rem;font-weight:800;color:var(--cyan);">👤 ${acc.user}</div>
+                <div style="display:flex;align-items:center;gap:0.5rem;">
+                  <div class="status-pill ${acc.isOnline ? 'st-online' : 'st-offline'}">${acc.isOnline ? '● ONLINE' : '○ OFFLINE'}</div>
+                  ${isAdmin ? `<button style="background:none;border:none;cursor:pointer;color:var(--red);" onclick="deleteAccountData('${acc.user}')">🗑️</button>` : ''}
+                </div>
+              </div>
+              <div class="acc-metrics">
+                <div><span style="color:var(--muted);font-size:0.75rem;">Total Gems</span><b style="color:var(--cyan);">x${acc.totalGems.toLocaleString('id-ID')}</b></div>
+                <div><span style="color:var(--muted);font-size:0.75rem;">Total Trait</span><b style="color:var(--purple);">x${acc.totalTrait.toLocaleString('id-ID')}</b></div>
+                <div><span style="color:var(--muted);font-size:0.75rem;">Gems/Jam</span><b>~${acc.gemsPerHour.toLocaleString('id-ID')}</b></div>
+                <div><span style="color:var(--muted);font-size:0.75rem;">Trait/Jam</span><b>~${acc.traitPerHour.toLocaleString('id-ID')}</b></div>
+              </div>
+              <div class="list-box">
+                <div class="list-title">Units Diterima (${acc.unitsReceived.length})</div>
+                <div class="list-content">${acc.unitsReceived.length > 0 ? acc.unitsReceived.map(u => `<div>• ${u}</div>`).join('') : '<div style="color:var(--muted);">Belum ada unit</div>'}</div>
+              </div>
+              <div class="list-box">
+                <div class="list-title">Tower Selesai / Floor Dicapai (${acc.towerList.length})</div>
+                <div class="list-content">${acc.towerList.length > 0 ? acc.towerList.map(t => `<div>🏆 ${t}</div>`).join('') : '<div style="color:var(--muted);">Belum ada tower/floor selesai</div>'}</div>
+              </div>
+              <div class="list-box">
+                <div class="list-title">Item & Potions</div>
+                <div class="list-content">${itemKeys.length > 0 ? itemKeys.map(k => `<div>• ${k}: x${acc.potionsObj[k]}</div>`).join('') : '<div style="color:var(--muted);">Belum ada item</div>'}</div>
               </div>
             </div>
-            <div class="acc-metrics">
-              <div><span style="color:var(--muted);font-size:0.75rem;">Total Gems</span><b style="color:var(--cyan);">x${acc.totalGems.toLocaleString('id-ID')}</b></div>
-              <div><span style="color:var(--muted);font-size:0.75rem;">Total Trait</span><b style="color:var(--purple);">x${acc.totalTrait.toLocaleString('id-ID')}</b></div>
-              <div><span style="color:var(--muted);font-size:0.75rem;">Gems/Jam</span><b>~${acc.gemsPerHour.toLocaleString('id-ID')}</b></div>
-              <div><span style="color:var(--muted);font-size:0.75rem;">Trait/Jam</span><b>~${acc.traitPerHour.toLocaleString('id-ID')}</b></div>
-            </div>
-
-            <!-- TABEL UNITS DITERIMA -->
-            <div class="list-box">
-              <div class="list-title">Units Diterima (${acc.unitsReceived.length})</div>
-              <div class="list-content">${acc.unitsReceived.length > 0 ? acc.unitsReceived.map(u => `<div>• ${u}</div>`).join('') : '<div style="color:var(--muted);">Belum ada unit</div>'}</div>
-            </div>
-
-            <!-- TABEL TOWER SELESAI (PATEN TEPAТ DI BAWAH TABEL UNITS) -->
-            <div class="list-box">
-              <div class="list-title">Tower Selesai / Floor Dicapai (${acc.towerList.length})</div>
-              <div class="list-content">${acc.towerList.length > 0 ? acc.towerList.map(t => `<div>🏆 ${t}</div>`).join('') : '<div style="color:var(--muted);">Belum ada tower/floor selesai</div>'}</div>
-            </div>
-
-            <!-- TABEL ITEM & POTIONS -->
-            <div class="list-box">
-              <div class="list-title">Item & Potions</div>
-              <div class="list-content">${itemKeys.length > 0 ? itemKeys.map(k => `<div>• ${k}: x${acc.potionsObj[k]}</div>`).join('') : '<div style="color:var(--muted);">Belum ada item</div>'}</div>
-            </div>
-          </div>
-        `;
-      }).join('')}
+          `;
+        }).join('')}
+      </div>
     </div>
+
+    <!-- TAB 2: MANAJEMEN USER ADMIN -->
+    ${isAdmin ? `
+    <div id="userAdminTab" style="display:none;">
+      <div class="acc-card" style="margin-bottom:1.5rem;">
+        <h3 style="margin-bottom:1rem;">🔑 Root Admin (Vercel Env)</h3>
+        <p style="color:var(--muted);font-size:0.9rem;">Username: <b style="color:var(--cyan);">${CONFIG.DASHBOARD_USER}</b></p>
+      </div>
+
+      <div class="acc-card">
+        <h3 style="margin-bottom:1rem;">👥 Pengelolaan & Persetujuan Pengguna</h3>
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Spesifik HP / Perangkat Login</th>
+              <th>Aksi Pengelolaan</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${allRegisteredUsers.length > 0 ? allRegisteredUsers.map(u => `
+              <tr>
+                <td><b>${u.username}</b></td>
+                <td>
+                  <select onchange="changeUserRole('${u.username}', this.value)" style="background:rgba(8,12,20,0.8);color:#fff;border:1px solid var(--card-border);padding:0.2rem;border-radius:4px;">
+                    <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
+                    <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                  </select>
+                </td>
+                <td>
+                  <span class="status-pill ${u.status === 'approved' ? 'st-online' : 'st-offline'}">
+                    ${u.status.toUpperCase()}
+                  </span>
+                </td>
+                <td style="font-family:'JetBrains Mono';color:var(--cyan);">${u.deviceInfo || 'Belum Ada Data'}</td>
+                <td>
+                  ${u.status === 'pending' ? `
+                    <button class="btn-action btn-acc" onclick="approveUser('${u.username}', true)">ACC / Setujui</button>
+                    <button class="btn-action btn-rej" onclick="approveUser('${u.username}', false)">Tolak</button>
+                  ` : `
+                    <button class="btn-action btn-ban" onclick="toggleBanUser('${u.username}')">
+                      ${u.status === 'banned' ? 'Unban' : 'Banned'}
+                    </button>
+                  `}
+                </td>
+              </tr>
+            `).join('') : '<tr><td colspan="5" style="text-align:center;color:var(--muted);">Belum ada pengguna terdaftar.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    ` : ''}
+
   </div>
 
   <script>
+    function switchTab(tab) {
+      document.getElementById('analyticsTab').style.display = tab === 'analytics' ? 'block' : 'none';
+      if (document.getElementById('userAdminTab')) {
+        document.getElementById('userAdminTab').style.display = tab === 'userAdmin' ? 'block' : 'none';
+      }
+      document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+      event.target.classList.add('active');
+    }
+
     function copyWebhookLink(){navigator.clipboard.writeText(document.getElementById('whUrlValue').innerText);alert('✅ Webhook URL disalin!');}
     async function toggleSystemAnalytics(el){await fetch('/api/system',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:el.checked})});}
     async function updateOfflineThreshold(v){await fetch('/api/dashboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setOfflineThreshold',offlineMin:v})});alert('✅ Threshold diubah!');}
     async function deleteAccountData(u){if(confirm('Hapus akun '+u+'?')){await fetch('/api/dashboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'deleteKey',key:'stats:'+u})});location.reload();}}
-    async function logout(){await fetch('/api/dashboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'logout'})});location.reload();}
-    async function confirmReset(){if(confirm('⚠️ Reset database statistik akun? (COST, BANDWIDTH & COMMANDS AMAN)')){await fetch('/api/dashboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'reset'})});location.reload();}}
+    
+    async function logout(){
+      const res = await fetch('/api/dashboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'logout'})});
+      const data = await res.json();
+      if(data.redirect) window.location.href = data.redirect;
+    }
 
-    // CHART LATENCY REAL-TIME ANIMASI BERGERAK
+    async function confirmReset(){if(confirm('⚠️ Reset database statistik akun?')){await fetch('/api/dashboard',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'reset'})});location.reload();}}
+
+    async function approveUser(user, approve) {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action: 'approveUser', targetUser: user, approve })
+      });
+      const data = await res.json();
+      alert(data.message);
+      location.reload();
+    }
+
+    async function changeUserRole(user, newRole) {
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action: 'changeRole', targetUser: user, newRole })
+      });
+      const data = await res.json();
+      alert(data.message);
+      location.reload();
+    }
+
+    async function toggleBanUser(user) {
+      if (confirm('Ubah status banned untuk ' + user + '?')) {
+        const res = await fetch('/api/users', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ action: 'toggleBan', targetUser: user })
+        });
+        const data = await res.json();
+        alert(data.message);
+        location.reload();
+      }
+    }
+
     const currentMs = ${realTimeMs};
     let history = JSON.parse(localStorage.getItem('lat_hist') || '[]');
     history.push({ time: new Date().toLocaleTimeString('id-ID'), ms: currentMs });
@@ -366,5 +484,6 @@ module.exports = async (req, res) => {
     });
   </script>
 </body>
-</html>`);
+</html>
+  `);
 };
