@@ -183,8 +183,8 @@ module.exports = async (req, res) => {
       const chatId = payload.message.chat.id;
       const userText = (payload.message.text || '').trim();
 
-      // Perintah /start hanya menampilkan pesan selamat datang & perintah utama
-      if (userText === '/start') {
+      // Perintah /vel menggantikan /start
+      if (userText === '/vel') {
         const welcomeText = `Selamat datang di Roblox Webhook Monitoring Bot!\n\n` +
           `Berikut adalah daftar perintah yang tersedia:\n` +
           `• /stats - Menampilkan akumulasi statistik dan estimasi rate per jam\n` +
@@ -194,7 +194,6 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true });
       }
 
-      // Perintah /reset meminta konfirmasi
       if (userText === '/reset') {
         await redisCmd('set', 'system:pending_reset', 'true');
         await redisCmd('expire', 'system:pending_reset', 300);
@@ -208,7 +207,6 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true });
       }
 
-      // Konfirmasi penghapusan
       if (userText === '/confirm') {
         const isPending = await redisCmd('get', 'system:pending_reset');
 
@@ -221,7 +219,6 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true });
       }
 
-      // Pembatalan penghapusan
       if (userText === '/false') {
         await redisCmd('del', 'system:pending_reset');
         await sendTelegramMessage(chatId, `✅ *Dibatalkan*\nProses penghapusan database telah dibatalkan.`);
