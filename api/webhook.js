@@ -6,7 +6,7 @@ const CONFIG = {
   REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
 };
 
-const TTL_30_MIN = 1800;
+const TTL_5_HOURS = 18000;
 
 function getCurrentTimeWIB() {
   return new Date().toLocaleString('id-ID', {
@@ -59,20 +59,20 @@ async function scanAndAccumulate(user, text) {
   const now = Date.now();
 
   await redisCmd('incrby', `${prefix}:totalLaporan`, 1);
-  await redisCmd('expire', `${prefix}:totalLaporan`, TTL_30_MIN);
+  await redisCmd('expire', `${prefix}:totalLaporan`, TTL_5_HOURS);
   await redisCmd('sadd', 'stats:users', user);
 
   const startTime = await redisCmd('get', `${prefix}:startTime`);
   if (!startTime) {
     await redisCmd('set', `${prefix}:startTime`, now);
-    await redisCmd('expire', `${prefix}:startTime`, TTL_30_MIN);
+    await redisCmd('expire', `${prefix}:startTime`, TTL_5_HOURS);
   } else {
-    await redisCmd('expire', `${prefix}:startTime`, TTL_30_MIN);
+    await redisCmd('expire', `${prefix}:startTime`, TTL_5_HOURS);
   }
 
   if (text.includes('New Unit!')) {
     await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
-    await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_30_MIN);
+    await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
 
     const nameMatch = text.match(/Name:\s*([^\r\n]+)/i);
     const mutationMatch = text.match(/Mutation:\s*([^\r\n]+)/i);
@@ -83,25 +83,25 @@ async function scanAndAccumulate(user, text) {
       if (mutationMatch) unitInfo += ` (${mutationMatch[1].trim()})`;
       if (rarityMatch) unitInfo += ` [${rarityMatch[1].trim()}]`;
       await redisCmd('rpush', `${prefix}:unitsReceived`, unitInfo);
-      await redisCmd('expire', `${prefix}:unitsReceived`, TTL_30_MIN);
+      await redisCmd('expire', `${prefix}:unitsReceived`, TTL_5_HOURS);
     }
   }
 
   if (text.includes('Tower Completed!')) {
     await redisCmd('incrby', `${prefix}:towerSelesai`, 1);
-    await redisCmd('expire', `${prefix}:towerSelesai`, TTL_30_MIN);
+    await redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS);
   }
 
   const gemsMatch = text.match(/Gems:\s*x?(\d+)/i);
   if (gemsMatch) {
     await redisCmd('incrby', `${prefix}:totalGems`, parseInt(gemsMatch[1], 10));
-    await redisCmd('expire', `${prefix}:totalGems`, TTL_30_MIN);
+    await redisCmd('expire', `${prefix}:totalGems`, TTL_5_HOURS);
   }
 
   const traitMatch = text.match(/Trait Reroll:\s*x?(\d+)/i);
   if (traitMatch) {
     await redisCmd('incrby', `${prefix}:totalTraitReroll`, parseInt(traitMatch[1], 10));
-    await redisCmd('expire', `${prefix}:totalTraitReroll`, TTL_30_MIN);
+    await redisCmd('expire', `${prefix}:totalTraitReroll`, TTL_5_HOURS);
   }
 
   const lines = text.split('\n');
@@ -112,7 +112,7 @@ async function scanAndAccumulate(user, text) {
       const qty = parseInt(itemMatch[2], 10);
       if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached'].includes(itemName)) {
         await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
-        await redisCmd('expire', `${prefix}:potions`, TTL_30_MIN);
+        await redisCmd('expire', `${prefix}:potions`, TTL_5_HOURS);
       }
     }
   }
@@ -184,14 +184,21 @@ module.exports = async (req, res) => {
       const userText = (payload.message.text || '').trim();
 
       if (userText === '/start') {
-        await sendTelegramMessage(chatId, `Bot Online\n\nID Telegram Anda: \`${chatId}\``);
+        const welcomeText = `Selamat datang di Roblox Webhook Monitoring Bot!\n\n` +
+          `Berikut adalah daftar perintah yang tersedia:\n` +
+          `• /stats - Menampilkan akumulasi statistik dan estimasi rate per jam\n` +
+          `• /reset - Mengosongkan seluruh data penyimpanan database\n` +
+          `• /null - Mengosongkan seluruh data penyimpanan database\n` +
+          `• /confirm - Mengonfirmasi tindakan penghapusan database\n` +
+          `• /false - Membatalkan tindakan penghapusan database`;
+
+        await sendTelegramMessage(chatId, welcomeText);
         return res.status(200).json({ success: true });
       }
 
-      // 1. Peringatan /null
-      if (userText === '/null') {
+      if (userText === '/null' || userText === '/reset') {
         await redisCmd('set', 'system:pending_reset', 'true');
-        await redisCmd('expire', 'system:pending_reset', 300); // Masa berlaku konfirmasi 5 menit
+        await redisCmd('expire', 'system:pending_reset', 300);
 
         const alertText = `⚠️ *PERINGATAN KONFIRMASI RESET*\n\n` +
           `Apakah Anda yakin ingin menghapus seluruh data statistik dan mengosongkan penyimpanan database?\n\n` +
@@ -202,7 +209,6 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true });
       }
 
-      // 2. Eksekusi Penghapusan /confirm
       if (userText === '/confirm') {
         const isPending = await redisCmd('get', 'system:pending_reset');
 
@@ -210,12 +216,11 @@ module.exports = async (req, res) => {
           await redisCmd('flushall');
           await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
         } else {
-          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /null terlebih dahulu untuk memulai permintaan reset.`);
+          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset atau /null terlebih dahulu untuk memulai permintaan reset.`);
         }
         return res.status(200).json({ success: true });
       }
 
-      // 3. Pembatalan /false
       if (userText === '/false') {
         await redisCmd('del', 'system:pending_reset');
         await sendTelegramMessage(chatId, `✅ *Dibatalkan*\nProses penghapusan database telah dibatalkan.`);
@@ -226,11 +231,11 @@ module.exports = async (req, res) => {
         const users = (await redisCmd('smembers', 'stats:users')) || [];
 
         if (!Array.isArray(users) || users.length === 0) {
-          await sendTelegramMessage(chatId, `*Hasil Akumulasi Scanning Bot (Sesi 30 Menit)*\nBelum ada data statistik yang masuk.`);
+          await sendTelegramMessage(chatId, `*Hasil Akumulasi Scanning Bot (Sesi 5 Jam)*\nBelum ada data statistik yang masuk.`);
           return res.status(200).json({ success: true });
         }
 
-        let reportText = `*Hasil Akumulasi Scanning Bot (Sesi 30 Menit)*\nWaktu Cetak: ${getCurrentTimeWIB()}\n────────────────\n`;
+        let reportText = `*Hasil Akumulasi Scanning Bot (Sesi 5 Jam)*\nWaktu Cetak: ${getCurrentTimeWIB()}\n────────────────\n`;
 
         for (const user of users) {
           const prefix = `stats:${user}`;
