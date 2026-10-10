@@ -40,6 +40,14 @@ function cleanStr(str) {
   return String(str).replace(/[\*_~`#]/g, '').trim();
 }
 
+// Daftar perintah yang tersedia untuk dicantumkan di Telegram
+const COMMANDS_LIST = 
+  `\n\n📌 <b>Perintah Yang Tersedia:</b>\n` +
+  `• <code>/info</code> - Ringkasan Laporan & Status Real-time\n` +
+  `• <code>/tower</code> - Laporan Selesai Tower & Floor\n` +
+  `• <code>/unit</code> - Laporan Unit / Drop Langka\n` +
+  `• <code>/stats</code> - Ringkasan Statistik Player`;
+
 module.exports = async (req, res) => {
   if (req.method === 'GET') {
     const statusRes = await redisCmd('get', 'system:analytics_status');
@@ -116,7 +124,7 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // 2. Ekstrak Tower (Format Pesan Telegram: /tower NamaAkun | NamaTower | Floor)
+      // 2. Ekstrak Tower (Pesan Telegram diawali /info & /tower)
       if (/Tower Completed!/i.test(fullText) || /Tower/i.test(fullText)) {
         const towerNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
         const floorMatch = fullText.match(/Floor Reached\s*:\s*([^\r\n]+)/i);
@@ -129,15 +137,16 @@ module.exports = async (req, res) => {
           await redisCmd('rpush', `${prefix}:towerList`, towerDisplayName);
           await redisCmd('incr', `${prefix}:towerSelesai`);
 
-          // Format notifikasi Telegram dengan perintah "/" dan pemisah "|"
+          // Format Telegram dengan /info dan format [Nama Akun] | [Nama Tower] | [Floor]
           await sendTelegramAlert(
-            `/tower 🏆\n\n` +
-            `<b>${username}</b> | <b>${tName}</b> | <b>Floor ${fNumber}</b>`
+            `/info 🏆 <b>TOWER COMPLETED</b>\n\n` +
+            `👤 <b>${username}</b> | <b>${tName}</b> | <b>Floor ${fNumber}</b>` +
+            COMMANDS_LIST
           );
         }
       }
 
-      // 3. Ekstrak Unit (Format Pesan Telegram: /unit NamaAkun | NamaUnit)
+      // 3. Ekstrak Unit (Pesan Telegram diawali /info & /unit)
       if (/New Unit!/i.test(fullText) || /HIGH-VALUE DROP/i.test(fullText)) {
         const unitNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
         const rarityMatch = fullText.match(/Rarity\s*:\s*([^\r\n]+)/i);
@@ -149,15 +158,15 @@ module.exports = async (req, res) => {
 
           await redisCmd('rpush', `${prefix}:unitsReceived`, unitDisplayName);
 
-          // Format notifikasi Telegram dengan perintah "/" dan pemisah "|"
           await sendTelegramAlert(
-            `/unit 🚨\n\n` +
-            `<b>${username}</b> | <b>${unitDisplayName}</b>`
+            `/info 🚨 <b>HIGH-VALUE DROP DETECTED</b>\n\n` +
+            `👤 <b>${username}</b> | <b>${unitDisplayName}</b>` +
+            COMMANDS_LIST
           );
         }
       }
 
-      // 4. Ekstrak Item & Drops Game Anime Dice Roblox (Gems, Trait Reroll, Buff Potions/Shadow Drops)
+      // 4. Ekstrak Item & Drops Anime Dice Roblox
       const dropMatches = [...fullText.matchAll(/([a-zA-Z0-9\s]+)\s*:\s*x([\d,.]+)/gi)];
 
       for (const match of dropMatches) {
@@ -170,7 +179,6 @@ module.exports = async (req, res) => {
           } else if (/^Trait Reroll$/i.test(itemName)) {
             await redisCmd('incrby', `${prefix}:totalTraitReroll`, qty);
           } else {
-            // Menyimpan item/potion bawaan Anime Dice (seperti Shadow Income I, Shadow Luck III, Speed, dll.)
             await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
           }
         }
