@@ -20,41 +20,6 @@ async function redisCmd(command, ...args) {
   }
 }
 
-// AMBIL METRIK REAL-TIME DARI UPSTASH SERVER VIA REDIS INFO
-async function getUpstashServerStats() {
-  if (!CONFIG.REDIS_URL || !CONFIG.REDIS_TOKEN) return null;
-  try {
-    const res = await fetch(`${CONFIG.REDIS_URL}/info`, {
-      headers: { Authorization: `Bearer ${CONFIG.REDIS_TOKEN}` }
-    });
-    const data = await res.json();
-    if (!data.result) return null;
-
-    const infoText = String(data.result);
-    
-    // Memory/Storage yang terpakai
-    const memMatch = infoText.match(/used_memory:(\d+)/);
-    const storageBytes = memMatch ? parseInt(memMatch[1], 10) : 0;
-
-    // Total Commands
-    const cmdMatch = infoText.match(/total_commands_processed:(\d+)/);
-    const totalCommands = cmdMatch ? parseInt(cmdMatch[1], 10) : 0;
-
-    // Total Net Input/Output Bytes (Bandwidth)
-    const netInMatch = infoText.match(/total_net_input_bytes:(\d+)/);
-    const netOutMatch = infoText.match(/total_net_output_bytes:(\d+)/);
-    const totalBytes = (netInMatch ? parseInt(netInMatch[1], 10) : 0) + (netOutMatch ? parseInt(netOutMatch[1], 10) : 0);
-
-    return {
-      commands: totalCommands,
-      bytes: totalBytes,
-      storage: storageBytes
-    };
-  } catch (e) {
-    return null;
-  }
-}
-
 function parseCookies(req) {
   const list = {};
   const rc = req.headers.cookie;
@@ -96,6 +61,7 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, redirect: '/api/login' });
     }
 
+    // RESET DB: Hapus data statistik & reset tracker persisten ke 0
     if (req.method === 'POST' && body.action === 'reset') {
       const usersRes = await redisCmd('smembers', 'stats:users');
       const users = usersRes.result || [];
@@ -122,6 +88,7 @@ module.exports = async (req, res) => {
       }
 
       await redisCmd('del', 'stats:users');
+      await redisCmd('set', 'global:total_commands', '0');
       await redisCmd('set', 'global:total_bytes', '0');
 
       return res.status(200).json({ 
@@ -148,24 +115,22 @@ module.exports = async (req, res) => {
     const currentRole = cookies.auth_role || 'user';
     const isAdmin = currentRole === 'admin' || currentUser === CONFIG.DASHBOARD_USER;
 
-    // AMBIL DATA METRIK SERVER REAL-TIME BERSAMAAN DENGAN QUERY REDIS LAIN
-    const [sysStatusRes, offlineMinRes, cmdRes, bytesRes, startRes, usersRes, serverStats] = await Promise.all([
+    // AMBIL DATA PERSISTEN REAL-TIME LANGSUNG DARI KEY REDIS
+    const [sysStatusRes, offlineMinRes, cmdRes, bytesRes, startRes, usersRes] = await Promise.all([
       redisCmd('get', 'system:analytics_status'),
       redisCmd('get', 'system:offline_threshold_min'),
       redisCmd('get', 'global:total_commands'),
       redisCmd('get', 'global:total_bytes'),
       redisCmd('get', 'global:system_start_time'),
-      redisCmd('smembers', 'stats:users'),
-      getUpstashServerStats()
+      redisCmd('smembers', 'stats:users')
     ]);
 
     const isAnalyticsOn = sysStatusRes.result !== 'disabled';
     const offlineMinConfig = offlineMinRes.result || '20';
 
-    // Prioritaskan metrik asli server Upstash
-    const globalCommands = serverStats ? serverStats.commands : parseInt(cmdRes.result || 0, 10);
-    const globalBandwidthBytes = serverStats ? serverStats.bytes : parseInt(bytesRes.result || 0, 10);
-    const globalStorageBytes = serverStats ? serverStats.storage : parseInt(bytesRes.result || 0, 10);
+    // Nilai presisi dari transaksi webhook
+    const globalCommands = parseInt(cmdRes.result || 0, 10);
+    const globalBytes = parseInt(bytesRes.result || 0, 10);
 
     const now = Date.now();
     const systemUptimeText = formatUptime(now - parseInt(startRes.result || now, 10));
@@ -316,13 +281,13 @@ module.exports = async (req, res) => {
         </div>
         <div class="up-metric-box">
           <div class="up-label">BANDWIDTH</div>
-          <div class="up-val-row"><div class="up-val">${(globalBandwidthBytes / 1024).toFixed(0)} KB</div><div class="up-sub">/ 10 GB</div></div>
-          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min(((globalBandwidthBytes/1024)/(10*1024*1024))*100, 100)}%;"></div></div>
+          <div class="up-val-row"><div class="up-val">${(globalBytes / 1024).toFixed(0)} KB</div><div class="up-sub">/ 10 GB</div></div>
+          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min(((globalBytes/1024)/(10*1024*1024))*100, 100)}%;"></div></div>
         </div>
         <div class="up-metric-box">
           <div class="up-label">STORAGE</div>
-          <div class="up-val-row"><div class="up-val">${globalStorageBytes} B</div><div class="up-sub">/ 256 MB</div></div>
-          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min((globalStorageBytes/(256*1024*1024))*100, 100)}%;"></div></div>
+          <div class="up-val-row"><div class="up-val">${globalBytes} B</div><div class="up-sub">/ 256 MB</div></div>
+          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min((globalBytes/(256*1024*1024))*100, 100)}%;"></div></div>
         </div>
         <div class="up-metric-box">
           <div class="up-label">COST</div>
