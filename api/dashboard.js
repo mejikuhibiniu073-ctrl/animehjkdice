@@ -1,4 +1,7 @@
 const CONFIG = {
+  // STEP 1 SECURE: Membaca murni dari Environment Variables Vercel
+  DASHBOARD_USER: process.env.DASHBOARD_USER,
+  DASHBOARD_PASS: process.env.DASHBOARD_PASS,
   REDIS_URL: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
   REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
 };
@@ -17,7 +20,136 @@ async function redisCmd(command, ...args) {
   }
 }
 
+function parseCookies(req) {
+  const list = {};
+  const rc = req.headers.cookie;
+  if (rc) {
+    rc.split(';').forEach(cookie => {
+      const parts = cookie.split('=');
+      list[parts.shift().trim()] = decodeURI(parts.join('='));
+    });
+  }
+  return list;
+}
+
 module.exports = async (req, res) => {
+  const cookies = parseCookies(req);
+
+  // Handling Logout
+  if (req.method === 'POST' && req.body && req.body.action === 'logout') {
+    res.setHeader('Set-Cookie', 'auth=; Path=/; HttpOnly; Max-Age=0');
+    return res.status(200).json({ success: true });
+  }
+
+  // Handling Login Action
+  if (req.method === 'POST' && req.body && req.body.action === 'login') {
+    const { username, password } = req.body;
+    
+    // Pastikan Environment Variable di Vercel sudah diisi
+    if (!CONFIG.DASHBOARD_USER || !CONFIG.DASHBOARD_PASS) {
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Kredensial belum dikonfigurasi di Vercel Environment Variables!' 
+      });
+    }
+
+    if (username === CONFIG.DASHBOARD_USER && password === CONFIG.DASHBOARD_PASS) {
+      res.setHeader('Set-Cookie', `auth=true; Path=/; HttpOnly; Max-Age=86400`);
+      return res.status(200).json({ success: true });
+    } else {
+      return res.status(401).json({ success: false, message: 'Username atau Password salah!' });
+    }
+  }
+
+  // Handling Action Reset Database dari Dashboard
+  if (req.method === 'POST' && req.body && req.body.action === 'reset') {
+    if (cookies.auth !== 'true') {
+      return res.status(401).json({ success: false, message: 'Unauthorized' });
+    }
+    await redisCmd('flushall');
+    return res.status(200).json({ success: true, message: 'Database telah dibersihkan sepenuhnya.' });
+  }
+
+  // Jika Belum Login -> Tampilkan Halaman Login
+  if (cookies.auth !== 'true') {
+    const loginHtml = `
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Dashboard Analytics</title>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; }
+    body { background: #07090e; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 1.5rem; }
+    .login-card { background: rgba(18, 26, 43, 0.85); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 2.5rem; width: 100%; max-width: 400px; backdrop-filter: blur(12px); box-shadow: 0 20px 40px rgba(0,0,0,0.5); }
+    .logo { width: 50px; height: 50px; background: linear-gradient(135deg, #38bdf8, #c084fc); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.6rem; margin: 0 auto 1.5rem auto; }
+    h2 { text-align: center; font-size: 1.4rem; font-weight: 800; margin-bottom: 0.5rem; }
+    p { text-align: center; color: #94a3b8; font-size: 0.85rem; margin-bottom: 1.5rem; }
+    .form-group { margin-bottom: 1.2rem; }
+    label { display: block; font-size: 0.8rem; font-weight: 600; color: #94a3b8; margin-bottom: 0.4rem; }
+    input { width: 100%; background: rgba(8, 12, 20, 0.8); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 0.75rem 1rem; color: #fff; font-size: 0.9rem; outline: none; transition: border-color 0.2s; }
+    input:focus { border-color: #38bdf8; }
+    .btn-submit { width: 100%; background: linear-gradient(135deg, #38bdf8, #0284c7); border: none; color: #fff; padding: 0.85rem; border-radius: 10px; font-weight: 700; font-size: 0.9rem; cursor: pointer; transition: opacity 0.2s; margin-top: 0.5rem; }
+    .btn-submit:hover { opacity: 0.9; }
+    .error-msg { color: #f43f5e; font-size: 0.8rem; text-align: center; margin-top: 1rem; display: none; }
+  </style>
+</head>
+<body>
+  <div class="login-card">
+    <div class="logo">🔐</div>
+    <h2>Dashboard Login</h2>
+    <p>Masukkan kredensial akun untuk mengakses data</p>
+    
+    <form id="loginForm">
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="username" required autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="password" required>
+      </div>
+      <button type="submit" class="btn-submit">Masuk Ke Dashboard</button>
+      <div id="errorMsg" class="error-msg"></div>
+    </form>
+  </div>
+
+  <script>
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const u = document.getElementById('username').value;
+      const p = document.getElementById('password').value;
+      const err = document.getElementById('errorMsg');
+
+      try {
+        const res = await fetch('/api/dashboard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'login', username: u, password: p })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          window.location.reload();
+        } else {
+          err.style.display = 'block';
+          err.innerText = data.message || 'Gagal login';
+        }
+      } catch (e) {
+        err.style.display = 'block';
+        err.innerText = 'Koneksi bermasalah!';
+      }
+    });
+  </script>
+</body>
+</html>
+    `;
+    res.setHeader('Content-Type', 'text/html');
+    return res.status(200).send(loginHtml);
+  }
+
+  // Ambil Data Redis Jika Sudah Terautentikasi
   let users = await redisCmd('smembers', 'stats:users');
   if (!Array.isArray(users)) users = users ? [users] : [];
 
@@ -78,13 +210,14 @@ module.exports = async (req, res) => {
     });
   }
 
+  // Render Halaman Dashboard Utama
   const html = `
 <!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Anime Dice Analytics Dashboard</title>
+  <title>Dashboard Analytics & Database Control</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
@@ -110,12 +243,11 @@ module.exports = async (req, res) => {
     .title-group h1 { font-size: 1.6rem; font-weight: 800; }
     .title-group p { font-size: 0.85rem; color: var(--text-muted); }
 
-    .header-right { display: flex; align-items: center; gap: 1rem; }
-    .btn-refresh { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text); padding: 0.65rem 1.25rem; border-radius: 10px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); }
-    .btn-refresh:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); }
-    .live-badge { display: flex; align-items: center; gap: 0.5rem; background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.2); color: var(--accent-green); padding: 0.5rem 1rem; border-radius: 9999px; font-size: 0.8rem; font-weight: 700; }
-    .dot { width: 8px; height: 8px; background: var(--accent-green); border-radius: 50%; box-shadow: 0 0 10px var(--accent-green); animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+    .header-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+    .btn { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text); padding: 0.6rem 1rem; border-radius: 10px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); }
+    .btn:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); }
+    .btn-danger { border-color: rgba(244, 63, 94, 0.3); color: var(--accent-red); }
+    .btn-danger:hover { background: rgba(244, 63, 94, 0.15); border-color: var(--accent-red); color: var(--accent-red); }
 
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
     .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
@@ -133,7 +265,7 @@ module.exports = async (req, res) => {
     .search-bar { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text); padding: 0.6rem 1rem; border-radius: 10px; font-size: 0.85rem; outline: none; width: 260px; }
 
     .cards-wrapper { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 1.25rem; }
-    .acc-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); position: relative; }
+    .acc-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
     .acc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--card-border); }
     .acc-user { font-size: 1.1rem; font-weight: 800; color: var(--accent-cyan); }
     .status-pill { font-size: 0.75rem; font-weight: 700; padding: 0.25rem 0.6rem; border-radius: 6px; }
@@ -161,23 +293,24 @@ module.exports = async (req, res) => {
       <div class="title-group">
         <div class="logo">🎲</div>
         <div>
-          <h1>Anime Dice Analytics</h1>
-          <p>Real-Time Farming & Webhook Data Monitor</p>
+          <h1>Analytics & DB Control</h1>
+          <p>Real-Time Upstash Redis Database Center</p>
         </div>
       </div>
       <div class="header-right">
-        <button class="btn-refresh" onclick="window.location.reload()">🔄 Refresh</button>
-        <div class="live-badge"><div class="dot"></div> LIVE REDIS DATA</div>
+        <button class="btn" onclick="window.location.reload()">🔄 Refresh /stats</button>
+        <button class="btn btn-danger" onclick="confirmReset()">🗑️ /reset Database</button>
+        <button class="btn" onclick="logout()">🚪 Logout</button>
       </div>
     </header>
 
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-label">Akun Terdaftar</div>
+        <div class="stat-label">Akun Aktif</div>
         <div class="stat-val">${users.length}</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Total Gems Sesi</div>
+        <div class="stat-label">Total Gems Database</div>
         <div class="stat-val c-cyan">x${totalGemsGlobal.toLocaleString('id-ID')}</div>
       </div>
       <div class="stat-card">
@@ -203,7 +336,7 @@ module.exports = async (req, res) => {
 
     <div class="accounts-section">
       <div class="section-header">
-        <h2 style="font-size: 1.2rem; font-weight: 800;">📋 Detail Laporan Per Akun</h2>
+        <h2 style="font-size: 1.2rem; font-weight: 800;">📋 Detail Statistik Akun (/stats)</h2>
         <input type="text" id="searchInput" class="search-bar" placeholder="Cari nama akun..." onkeyup="filterCards()">
       </div>
 
@@ -215,7 +348,7 @@ module.exports = async (req, res) => {
               <div class="acc-header">
                 <div class="acc-user">👤 ${acc.user}</div>
                 <div class="status-pill ${acc.isOnline ? 'st-online' : 'st-offline'}">
-                  ${acc.isOnline ? '● ACTIVE' : '○ OFFLINE'}
+                  ${acc.isOnline ? '● ONLINE' : '○ OFFLINE'}
                 </div>
               </div>
 
@@ -241,7 +374,7 @@ module.exports = async (req, res) => {
                   <b>${acc.totalLaporan} log</b>
                 </div>
                 <div class="metric-item">
-                  <span>Tower Completed</span>
+                  <span>Tower Selesai</span>
                   <b>${acc.towerSelesai}</b>
                 </div>
               </div>
@@ -278,6 +411,32 @@ module.exports = async (req, res) => {
 
   <script>
     setTimeout(() => { window.location.reload(); }, 30000);
+
+    async function logout() {
+      await fetch('/api/dashboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'logout' })
+      });
+      window.location.reload();
+    }
+
+    async function confirmReset() {
+      if (confirm('⚠️ PERINGATAN: Apakah Anda yakin ingin menghapus SELURUH data akumulasi statistik di database?')) {
+        const res = await fetch('/api/dashboard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'reset' })
+        });
+        const data = await res.json();
+        if (res.ok && data.success) {
+          alert('✅ Database telah berhasil dibersihkan.');
+          window.location.reload();
+        } else {
+          alert('❌ Gagal mereset database.');
+        }
+      }
+    }
 
     function filterCards() {
       const q = document.getElementById('searchInput').value.toLowerCase();
