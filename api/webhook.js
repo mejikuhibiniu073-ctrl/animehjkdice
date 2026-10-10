@@ -7,7 +7,7 @@ const CONFIG = {
 };
 
 const TTL_5_HOURS = 18000;
-const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000; // 20 Menit
+const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000;
 
 function getCurrentTimeWIB() {
   return new Date().toLocaleString('id-ID', {
@@ -26,18 +26,12 @@ function extractCleanUsername(rawName, fullText) {
   const cleanText = fullText.replace(/\*\*/g, '');
 
   const bodyUserMatch = cleanText.match(/Username:\s*\|\|([^|]+)\|\|/i);
-  if (bodyUserMatch) {
-    return bodyUserMatch[1].trim();
-  }
+  if (bodyUserMatch) return bodyUserMatch[1].trim();
 
   const plainUserMatch = cleanText.match(/Username:\s*([^\r\n]+)/i);
-  if (plainUserMatch) {
-    return plainUserMatch[1].replace(/\|\|/g, '').trim();
-  }
+  if (plainUserMatch) return plainUserMatch[1].replace(/\|\|/g, '').trim();
 
-  if (rawName) {
-    return rawName.replace(/\|\|/g, '').replace(/\*\*/g, '').trim();
-  }
+  if (rawName) return rawName.replace(/\|\|/g, '').replace(/\*\*/g, '').trim();
 
   return 'Roblox Script';
 }
@@ -52,7 +46,7 @@ async function redisCmd(command, ...args) {
     const data = await res.json();
     return data.result;
   } catch (e) {
-    console.error('[Redis Communication Error]:', e);
+    console.error('[Redis Error]:', e);
     return null;
   }
 }
@@ -110,8 +104,6 @@ async function scanAndAccumulate(user, text) {
   }
 
   const cleanText = text.replace(/\*\*/g, '');
-
-  // DETEKSI AKURAT: Memastikan pesan benar-benar sebuah UNIT (Bukan Tower)
   const isUnitDrop = /Cash\/s|Plot Avg|Grade:|Tier:/i.test(cleanText) && /(?:Name|Unit):/i.test(cleanText);
 
   if (isUnitDrop) {
@@ -135,14 +127,12 @@ async function scanAndAccumulate(user, text) {
       }
     }
   } else {
-    // Hanya hitung Tower Completed jika BUKAN pesan unit
     if (/tower completed|floor reached/i.test(cleanText)) {
       await redisCmd('incrby', `${prefix}:towerSelesai`, 1);
       await redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS);
     }
   }
 
-  // Akumulasi Gems
   const gemsMatch = cleanText.match(/Gems:\s*x?([\d,]+)/i);
   if (gemsMatch) {
     const gemsVal = parseInt(gemsMatch[1].replace(/,/g, ''), 10);
@@ -152,7 +142,6 @@ async function scanAndAccumulate(user, text) {
     }
   }
 
-  // Akumulasi Trait Reroll
   const traitMatch = cleanText.match(/Trait Reroll:\s*x?([\d,]+)/i);
   if (traitMatch) {
     const traitVal = parseInt(traitMatch[1].replace(/,/g, ''), 10);
@@ -162,7 +151,6 @@ async function scanAndAccumulate(user, text) {
     }
   }
 
-  // Akumulasi Item / Potion
   const lines = cleanText.split('\n');
   for (const line of lines) {
     const itemMatch = line.match(/([A-Za-z0-9'\s]+):\s*x([\d,]+)/);
@@ -190,9 +178,7 @@ function checkRareAlert(text) {
   const qdMatch = lower.match(/1\/(\d+(\.\d+)?)qd/i);
   if (qdMatch) {
     const qdVal = parseFloat(qdMatch[1]);
-    if (!isNaN(qdVal) && qdVal >= 500) {
-      return true;
-    }
+    if (!isNaN(qdVal) && qdVal >= 500) return true;
   }
 
   return false;
@@ -234,15 +220,9 @@ function formatCategorizedItems(potionsObj) {
   }
 
   let output = '';
-  if (potions.length > 0) {
-    output += `  🧪 *Potions & Boosts:*\n${potions.join('\n')}\n`;
-  }
-  if (keysTickets.length > 0) {
-    output += `  🔑 *Keys & Tickets:*\n${keysTickets.join('\n')}\n`;
-  }
-  if (materials.length > 0) {
-    output += `  📦 *Chests & Materials:*\n${materials.join('\n')}\n`;
-  }
+  if (potions.length > 0) output += `  🧪 *Potions & Boosts:*\n${potions.join('\n')}\n`;
+  if (keysTickets.length > 0) output += `  🔑 *Keys & Tickets:*\n${keysTickets.join('\n')}\n`;
+  if (materials.length > 0) output += `  📦 *Chests & Materials:*\n${materials.join('\n')}\n`;
 
   return output.trimEnd();
 }
@@ -336,9 +316,7 @@ module.exports = async (req, res) => {
 
       if (userText === '/stats') {
         let users = await redisCmd('smembers', 'stats:users');
-        if (!Array.isArray(users)) {
-          users = users ? [users] : [];
-        }
+        if (!Array.isArray(users)) users = users ? [users] : [];
 
         if (users.length === 0) {
           await sendTelegramMessage(chatId, `*Hasil Akumulasi Scanning Bot (Sesi 5 Jam)*\nBelum ada data statistik yang masuk.`);
@@ -357,9 +335,7 @@ module.exports = async (req, res) => {
           const startTime = parseInt((await redisCmd('get', `${prefix}:startTime`)) || Date.now(), 10);
 
           let unitsReceived = await redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1);
-          if (!Array.isArray(unitsReceived)) {
-            unitsReceived = unitsReceived ? [unitsReceived] : [];
-          }
+          if (!Array.isArray(unitsReceived)) unitsReceived = unitsReceived ? [unitsReceived] : [];
 
           const potionsRaw = (await redisCmd('hgetall', `${prefix}:potions`)) || [];
 
@@ -378,9 +354,7 @@ module.exports = async (req, res) => {
 
           let unitList = 'Belum ada';
           if (unitsReceived.length > 0) {
-            unitList = unitsReceived
-              .map(u => `    • ${u}`)
-              .join('\n');
+            unitList = unitsReceived.map(u => `    • ${u}`).join('\n');
           }
 
           const categorizedItemsText = formatCategorizedItems(potionsObj);
@@ -448,6 +422,6 @@ module.exports = async (req, res) => {
 
   } catch (error) {
     console.error('[Webhook Processing Error]:', error.message);
-    return res.status(500).json({ success: false, error: 'Internal server error processing webhook' });
+    return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
