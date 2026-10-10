@@ -20,6 +20,28 @@ function getCurrentTimeWIB() {
   });
 }
 
+// Helper ekstraksi nama dari format ||username|| atau teks biasa
+function extractCleanUsername(rawName, fullText) {
+  // Cek apakah ada pola Username: ||nama|| di dalam teks laporan
+  const bodyUserMatch = fullText.match(/Username:\s*\|\|([^|]+)\|\|/i);
+  if (bodyUserMatch) {
+    return bodyUserMatch[1].trim();
+  }
+
+  // Cek apakah ada pola Username: nama biasa di dalam teks
+  const plainUserMatch = fullText.match(/Username:\s*([^\r\n]+)/i);
+  if (plainUserMatch) {
+    return plainUserMatch[1].replace(/\|\|/g, '').trim();
+  }
+
+  // Jika dari header sender payload
+  if (rawName) {
+    return rawName.replace(/\|\|/g, '').trim();
+  }
+
+  return 'Roblox Script';
+}
+
 async function redisCmd(command, ...args) {
   if (!CONFIG.REDIS_URL || !CONFIG.REDIS_TOKEN) return null;
   try {
@@ -93,10 +115,7 @@ async function scanAndAccumulate(user, text) {
 
 function checkRareAlert(text) {
   const lower = text.toLowerCase();
-  if (lower.includes('secret') || lower.includes('monarch') || lower.includes('mythic')) {
-    return true;
-  }
-  return false;
+  return lower.includes('secret') || lower.includes('monarch') || lower.includes('mythic');
 }
 
 function parseDiscordEmbed(embed) {
@@ -234,10 +253,6 @@ module.exports = async (req, res) => {
     }
 
     // 2. Pemindaian DAN Pengiriman Pesan dari Roblox
-    const senderName = payload?.username || 'Roblox Script';
-    const timeWIB = getCurrentTimeWIB();
-    const eventType = payload?.event_type || 'normal';
-
     let fullTextToScan = '';
     let messageBody = '';
 
@@ -256,18 +271,23 @@ module.exports = async (req, res) => {
       fullTextToScan = messageBody;
     }
 
-    await scanAndAccumulate(senderName, fullTextToScan);
+    // Ekstraksi Username Asli
+    const cleanUsername = extractCleanUsername(payload?.username, fullTextToScan);
+    const timeWIB = getCurrentTimeWIB();
+    const eventType = payload?.event_type || 'normal';
+
+    await scanAndAccumulate(cleanUsername, fullTextToScan);
 
     let formattedMessage = '';
     const isRare = checkRareAlert(fullTextToScan);
     const alertPrefix = isRare ? `🚨 *[HIGH-VALUE DROP DETECTED]* 🚨\n` : '';
 
     if (eventType === 'error') {
-      formattedMessage = `*[ERROR LOG]*\nUsername: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\n${payload?.error_message || 'Error pada script.'}`;
+      formattedMessage = `*[ERROR LOG]*\nUsername: *${cleanUsername}*\nWaktu: ${timeWIB}\n────────────────\n${payload?.error_message || 'Error pada script.'}`;
     } else if (eventType === 'disconnect') {
-      formattedMessage = `*[DISCONNECT ALERT]*\nUsername: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\nScript terputus dari server!`;
+      formattedMessage = `*[DISCONNECT ALERT]*\nUsername: *${cleanUsername}*\nWaktu: ${timeWIB}\n────────────────\nScript terputus dari server!`;
     } else {
-      formattedMessage = `${alertPrefix}Username: *${senderName}*\nWaktu: ${timeWIB}\n────────────────\n${messageBody}`;
+      formattedMessage = `${alertPrefix}Username: *${cleanUsername}*\nWaktu: ${timeWIB}\n────────────────\n${messageBody}`;
     }
 
     await sendTelegramMessage(CONFIG.CHAT_ID, formattedMessage);
