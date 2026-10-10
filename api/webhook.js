@@ -71,47 +71,57 @@ async function scanAndAccumulate(user, text) {
     await redisCmd('expire', `${prefix}:startTime`, TTL_5_HOURS);
   }
 
-  if (text.includes('New Unit!')) {
+  // Deteksi Unit Masuk (Format Luas)
+  const isUnitMessage = /new unit|unit received|got unit|received unit|unit:/i.test(text);
+  
+  if (isUnitMessage) {
     await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
     await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
 
-    const nameMatch = text.match(/Name:\s*([^\r\n]+)/i);
+    const nameMatch = text.match(/(?:Name|Unit):\s*([^\r\n]+)/i);
     const mutationMatch = text.match(/Mutation:\s*([^\r\n]+)/i);
     const rarityMatch = text.match(/Rarity:\s*([^\r\n]+)/i);
 
     if (nameMatch) {
-      let unitInfo = nameMatch[1].trim();
-      if (mutationMatch) unitInfo += ` (${mutationMatch[1].trim()})`;
-      if (rarityMatch) unitInfo += ` [${rarityMatch[1].trim()}]`;
+      let unitInfo = nameMatch[1].replace(/\|\|/g, '').trim();
+      if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
+      if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
+      
       await redisCmd('rpush', `${prefix}:unitsReceived`, unitInfo);
       await redisCmd('expire', `${prefix}:unitsReceived`, TTL_5_HOURS);
     }
   }
 
-  if (text.includes('Tower Completed!')) {
+  if (/tower completed/i.test(text)) {
     await redisCmd('incrby', `${prefix}:towerSelesai`, 1);
     await redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS);
   }
 
-  const gemsMatch = text.match(/Gems:\s*x?(\d+)/i);
+  const gemsMatch = text.match(/Gems:\s*x?([\d,]+)/i);
   if (gemsMatch) {
-    await redisCmd('incrby', `${prefix}:totalGems`, parseInt(gemsMatch[1], 10));
-    await redisCmd('expire', `${prefix}:totalGems`, TTL_5_HOURS);
+    const gemsVal = parseInt(gemsMatch[1].replace(/,/g, ''), 10);
+    if (!isNaN(gemsVal)) {
+      await redisCmd('incrby', `${prefix}:totalGems`, gemsVal);
+      await redisCmd('expire', `${prefix}:totalGems`, TTL_5_HOURS);
+    }
   }
 
-  const traitMatch = text.match(/Trait Reroll:\s*x?(\d+)/i);
+  const traitMatch = text.match(/Trait Reroll:\s*x?([\d,]+)/i);
   if (traitMatch) {
-    await redisCmd('incrby', `${prefix}:totalTraitReroll`, parseInt(traitMatch[1], 10));
-    await redisCmd('expire', `${prefix}:totalTraitReroll`, TTL_5_HOURS);
+    const traitVal = parseInt(traitMatch[1].replace(/,/g, ''), 10);
+    if (!isNaN(traitVal)) {
+      await redisCmd('incrby', `${prefix}:totalTraitReroll`, traitVal);
+      await redisCmd('expire', `${prefix}:totalTraitReroll`, TTL_5_HOURS);
+    }
   }
 
   const lines = text.split('\n');
   for (const line of lines) {
-    const itemMatch = line.match(/([A-Za-z0-9'\s]+):\s*x(\d+)/);
+    const itemMatch = line.match(/([A-Za-z0-9'\s]+):\s*x([\d,]+)/);
     if (itemMatch) {
       const itemName = itemMatch[1].trim();
-      const qty = parseInt(itemMatch[2], 10);
-      if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached'].includes(itemName)) {
+      const qty = parseInt(itemMatch[2].replace(/,/g, ''), 10);
+      if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached'].includes(itemName) && !isNaN(qty)) {
         await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
         await redisCmd('expire', `${prefix}:potions`, TTL_5_HOURS);
       }
@@ -142,9 +152,9 @@ function generateSmartInsights(gemsPerHour, traitPerHour, totalLaporan, unitCoun
   const insights = [];
   
   if (gemsPerHour > 300) {
-    insights.push('🔥 Performa farming Gems sangat tinggi (di atas target optimal).');
+    insights.push('🔥 Performa farming Gems sangat tinggi.');
   } else if (gemsPerHour < 100) {
-    insights.push('⚠️ Performa Gems tergolong rendah. Disarankan periksa buff atau peta Tower.');
+    insights.push('⚠️ Performa Gems tergolong rendah.');
   } else {
     insights.push('✅ Kecepatan farming Gems stabil.');
   }
@@ -154,7 +164,7 @@ function generateSmartInsights(gemsPerHour, traitPerHour, totalLaporan, unitCoun
   }
 
   if (unitCount > 0) {
-    insights.push(`🎉 Berhasil mendapatkan ${unitCount} unit baru selama sesi ini.`);
+    insights.push(`🎉 Berhasil mendapatkan ${unitCount} unit baru.`);
   }
 
   return insights.join('\n    • ');
@@ -209,8 +219,8 @@ module.exports = async (req, res) => {
       if (userText === '/vel') {
         const welcomeText = `Selamat datang di Roblox Webhook Monitoring Bot!\n\n` +
           `Berikut adalah daftar perintah yang tersedia:\n` +
-          `• /stats - Menampilkan akumulasi statistik, estimasi rate, dan AI Insights\n` +
-          `• /dashboard - Membuka halaman grafik visualisasi web\n` +
+          `• /stats - Menampilkan akumulasi statistik dan unit\n` +
+          `• /dashboard - Membuka halaman visualisasi web\n` +
           `• /reset - Mengosongkan seluruh data penyimpanan database`;
 
         await sendTelegramMessage(chatId, welcomeText);
@@ -247,7 +257,7 @@ module.exports = async (req, res) => {
           await redisCmd('flushall');
           await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
         } else {
-          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset terlebih dahulu untuk memulai permintaan reset.`);
+          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset terlebih dahulu.`);
         }
         return res.status(200).json({ success: true });
       }
@@ -276,7 +286,12 @@ module.exports = async (req, res) => {
           const totalGems = parseInt((await redisCmd('get', `${prefix}:totalGems`)) || 0, 10);
           const totalTraitReroll = parseInt((await redisCmd('get', `${prefix}:totalTraitReroll`)) || 0, 10);
           const startTime = parseInt((await redisCmd('get', `${prefix}:startTime`)) || Date.now(), 10);
-          const unitsReceived = (await redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1)) || [];
+          
+          let unitsReceived = await redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1);
+          if (!Array.isArray(unitsReceived)) {
+            unitsReceived = unitsReceived ? [unitsReceived] : [];
+          }
+
           const potionsRaw = (await redisCmd('hgetall', `${prefix}:potions`)) || [];
 
           const durationHours = Math.max((Date.now() - startTime) / (1000 * 60 * 60), 0.01);
@@ -301,7 +316,7 @@ module.exports = async (req, res) => {
           }
 
           let unitList = 'Belum ada';
-          if (Array.isArray(unitsReceived) && unitsReceived.length > 0) {
+          if (unitsReceived.length > 0) {
             unitList = unitsReceived
               .map(u => `    • ${u}`)
               .join('\n');
