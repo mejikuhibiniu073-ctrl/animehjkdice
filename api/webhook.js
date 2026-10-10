@@ -20,21 +20,17 @@ function getCurrentTimeWIB() {
   });
 }
 
-// Helper ekstraksi nama dari format ||username|| atau teks biasa
 function extractCleanUsername(rawName, fullText) {
-  // Cek apakah ada pola Username: ||nama|| di dalam teks laporan
   const bodyUserMatch = fullText.match(/Username:\s*\|\|([^|]+)\|\|/i);
   if (bodyUserMatch) {
     return bodyUserMatch[1].trim();
   }
 
-  // Cek apakah ada pola Username: nama biasa di dalam teks
   const plainUserMatch = fullText.match(/Username:\s*([^\r\n]+)/i);
   if (plainUserMatch) {
     return plainUserMatch[1].replace(/\|\|/g, '').trim();
   }
 
-  // Jika dari header sender payload
   if (rawName) {
     return rawName.replace(/\|\|/g, '').trim();
   }
@@ -174,7 +170,6 @@ module.exports = async (req, res) => {
       }
     }
 
-    // 1. Respon Perintah dari Telegram (/stats & /reset)
     if (payload && payload.message) {
       const chatId = payload.message.chat.id;
       const userText = (payload.message.text || '').trim();
@@ -252,7 +247,6 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true });
     }
 
-    // 2. Pemindaian DAN Pengiriman Pesan dari Roblox
     let fullTextToScan = '';
     let messageBody = '';
 
@@ -271,7 +265,6 @@ module.exports = async (req, res) => {
       fullTextToScan = messageBody;
     }
 
-    // Ekstraksi Username Asli
     const cleanUsername = extractCleanUsername(payload?.username, fullTextToScan);
     const timeWIB = getCurrentTimeWIB();
     const eventType = payload?.event_type || 'normal';
