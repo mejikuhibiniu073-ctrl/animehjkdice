@@ -191,13 +191,13 @@ module.exports = async (req, res) => {
   let latestSeenTime = 0;
 
   for (const k of keysList) {
-    const kType = await redisCmd('type', k);
-    const ttl = await redisCmd('ttl', k);
+    const kType = await redisCmd('type', k) || 'none';
+    const ttl = await redisCmd('ttl', k) || -1;
     let val = null;
 
     if (kType === 'string') {
       val = await redisCmd('get', k);
-      totalBytes += (String(val).length);
+      totalBytes += (String(val || '').length);
     } else if (kType === 'set') {
       val = await redisCmd('smembers', k);
       if (!Array.isArray(val)) val = val ? [val] : [];
@@ -236,7 +236,7 @@ module.exports = async (req, res) => {
   const protocol = req.headers['x-forwarded-proto'] || 'https';
   const webhookEndpoint = `${protocol}://${hostHeader}/api/webhook`;
 
-  // Render Dashboard
+  // Render Dashboard HTML
   const html = `
 <!DOCTYPE html>
 <html lang="id">
@@ -275,7 +275,6 @@ module.exports = async (req, res) => {
     .btn-danger { color: #ef4444; border-color: #fee2e2; }
     .btn-danger:hover { background: #fef2f2; }
 
-    /* WEBHOOK PANEL (DESAIN MODERN BARU) */
     .webhook-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 1.25rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.02); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
     .wh-info { display: flex; align-items: center; gap: 1rem; }
     .wh-status-dot { width: 12px; height: 12px; background: var(--emerald); border-radius: 50%; box-shadow: 0 0 10px var(--emerald); animation: pulse 1.8s infinite; }
@@ -284,7 +283,6 @@ module.exports = async (req, res) => {
     .wh-url-box { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; background: #f1f5f9; padding: 0.4rem 0.75rem; border-radius: 8px; border: 1px solid var(--border); margin-top: 0.3rem; color: #334155; }
     .wh-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
 
-    /* METRICS CARDS */
     .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
     .metric-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 14px; padding: 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.02); }
     .metric-title { font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
@@ -294,7 +292,6 @@ module.exports = async (req, res) => {
     .progress-bar { width: 100%; height: 5px; background: #e2e8f0; border-radius: 999px; overflow: hidden; }
     .progress-fill { height: 100%; background: var(--emerald); border-radius: 999px; }
 
-    /* DATA BROWSER CONTAINER */
     .browser-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); overflow: hidden; }
     .browser-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 0.85rem 1.25rem; border-bottom: 1px solid var(--border); background: #fafafa; flex-wrap: wrap; gap: 0.75rem; }
     
@@ -304,7 +301,6 @@ module.exports = async (req, res) => {
 
     .browser-body { display: grid; grid-template-columns: 280px 1fr; min-height: 480px; }
 
-    /* LEFT SIDEBAR: KEY LIST */
     .keys-sidebar { border-right: 1px solid var(--border); padding: 0.75rem; background: #f8fafc; }
     .key-item { display: flex; align-items: center; gap: 0.6rem; padding: 0.65rem 0.8rem; border-radius: 10px; font-size: 0.85rem; font-weight: 600; cursor: pointer; color: var(--text); margin-bottom: 0.25rem; transition: all 0.15s; }
     .key-item:hover { background: #f1f5f9; }
@@ -316,7 +312,6 @@ module.exports = async (req, res) => {
     .badge-hash { background: #fef3c7; color: #92400e; }
     .badge-list { background: #fce7f3; color: #9d174d; }
 
-    /* RIGHT CONTENT: KEY DETAIL */
     .key-detail { padding: 1.25rem; background: #fff; display: flex; flex-direction: column; }
     .detail-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.85rem; border-bottom: 1px solid var(--border); }
     .key-title { font-family: 'JetBrains Mono', monospace; font-size: 1.1rem; font-weight: 700; }
@@ -331,7 +326,6 @@ module.exports = async (req, res) => {
     .btn-icon { background: none; border: none; cursor: pointer; color: var(--text-muted); padding: 0.2rem; border-radius: 4px; }
     .btn-icon:hover { color: #ef4444; }
 
-    /* MODAL ADD KEY */
     .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(15, 23, 42, 0.4); display: none; align-items: center; justify-content: center; z-index: 1000; }
     .modal-box { background: #fff; border-radius: 16px; padding: 1.5rem; width: 100%; max-width: 420px; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1); }
     .modal-title { font-size: 1.1rem; font-weight: 800; margin-bottom: 1rem; }
@@ -348,7 +342,6 @@ module.exports = async (req, res) => {
 <body>
   <div class="container">
     
-    <!-- HEADER -->
     <header>
       <div class="brand">
         <div class="brand-icon">⚡</div>
@@ -363,10 +356,9 @@ module.exports = async (req, res) => {
       </div>
     </header>
 
-    <!-- PANEL KONEKTIVITAS WEBHOOK MODERN -->
     <div class="webhook-card">
       <div class="wh-info">
-        <div class="wh-status-dot" id="whDot"></div>
+        <div class="wh-status-dot"></div>
         <div>
           <div class="wh-title">
             <span>🔗 Vercel Webhook Endpoint Gateway</span>
@@ -384,7 +376,6 @@ module.exports = async (req, res) => {
       </div>
     </div>
 
-    <!-- METRICS CARDS -->
     <div class="metrics-grid">
       <div class="metric-card">
         <div class="metric-title">COMMANDS</div>
@@ -421,7 +412,6 @@ module.exports = async (req, res) => {
       </div>
     </div>
 
-    <!-- DATA BROWSER CONTAINER -->
     <div class="browser-card">
       <div class="browser-toolbar">
         <div class="toolbar-left">
@@ -440,7 +430,6 @@ module.exports = async (req, res) => {
       </div>
 
       <div class="browser-body">
-        <!-- LEFT SIDEBAR -->
         <div class="keys-sidebar" id="keysList">
           ${keysList.length > 0 ? keysList.map(k => {
             const item = dbBrowserData[k];
@@ -454,7 +443,6 @@ module.exports = async (req, res) => {
           }).join('') : `<div style="padding: 1rem; color: var(--text-muted); font-size: 0.85rem;">No keys found</div>`}
         </div>
 
-        <!-- RIGHT DETAIL -->
         <div class="key-detail" id="keyDetail">
           <div style="display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-muted); font-size: 0.9rem;">
             Pilih key di sebelah kiri untuk melihat & mengedit isi data.
@@ -465,7 +453,6 @@ module.exports = async (req, res) => {
 
   </div>
 
-  <!-- MODAL ADD KEY -->
   <div class="modal-overlay" id="addModal">
     <div class="modal-box">
       <div class="modal-title">Tambah Key Baru</div>
@@ -513,7 +500,7 @@ module.exports = async (req, res) => {
         const res = await fetch(urlText, { method: 'GET' });
         const data = await res.json();
         if (res.ok) {
-          alert('🟢 WEBHOOK ONLINE!\n\nStatus: ' + data.status + '\nPesan: ' + data.message);
+          alert('🟢 WEBHOOK ONLINE!\\n\\nStatus: ' + data.status + '\\nPesan: ' + data.message);
         } else {
           alert('🔴 Webhook merespons dengan error status: ' + res.status);
         }
@@ -535,31 +522,31 @@ module.exports = async (req, res) => {
 
       if (item.type === 'set' || item.type === 'list') {
         const arr = Array.isArray(item.value) ? item.value : [item.value];
-        valueHtml = arr.map(v => `
+        valueHtml = arr.map(v => \`
           <div class="val-row">
-            <span>${v}</span>
-            <button class="btn-icon" onclick="removeItem('${k}', '${item.type}', '${v}')">🗑️</button>
+            <span>\${v}</span>
+            <button class="btn-icon" onclick="removeItem('\${k}', '\${item.type}', '\${v}')">🗑️</button>
           </div>
-        `).join('');
+        \`).join('');
       } else if (item.type === 'hash') {
         const keys = Object.keys(item.value || {});
-        valueHtml = keys.map(f => `
+        valueHtml = keys.map(f => \`
           <div class="val-row">
-            <div><b>${f}:</b>${item.value[f]}</div>
-            <button class="btn-icon" onclick="removeHashField('${k}', '${f}')">🗑️</button>
+            <div><b>\${f}:</b> \${item.value[f]}</div>
+            <button class="btn-icon" onclick="removeHashField('\${k}', '\${f}')">🗑️</button>
           </div>
-        `).join('');
+        \`).join('');
       } else {
-        valueHtml = `
+        valueHtml = \`
           <div class="val-row">
-            <span>${item.value}</span>
+            <span>\${item.value}</span>
           </div>
-        `;
+        \`;
       }
 
-      detailContainer.innerHTML = `
+      detailContainer.innerHTML = \`
         <div class="detail-header">
-          <div class="key-title">${k}</div>
+          <div class="key-title">\${k}</div>
           <div class="meta-badges">
             <span class="type-badge badge-\${item.type.toLowerCase()}">\${item.type}</span>
             <span class="meta-tag">TTL: \${item.ttl > 0 ? item.ttl + 's' : 'No'}</span>
@@ -570,7 +557,7 @@ module.exports = async (req, res) => {
         <div class="value-container">
           \${valueHtml || '<div style="color: var(--text-muted);">Kosong</div>'}
         </div>
-      `;
+      \`;
     }
 
     function filterKeys() {
