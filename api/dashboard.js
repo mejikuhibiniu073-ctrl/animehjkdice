@@ -145,7 +145,10 @@ module.exports = async (req, res) => {
     return res.status(200).send(loginHtml);
   }
 
-  // AMBIL DATA DASHBOARD REAL-TIME
+  // AMBIL DATA DASHBOARD & STATUS SYSTEM
+  const systemStatus = (await redisCmd('get', 'system:analytics_status')).result;
+  const isAnalyticsOn = systemStatus !== 'disabled';
+
   const usersRes = await redisCmd('smembers', 'stats:users');
   let users = usersRes.result;
   const realTimeMs = usersRes.latencyMs;
@@ -250,6 +253,16 @@ module.exports = async (req, res) => {
     .btn-danger { border-color: rgba(244, 63, 94, 0.3); color: var(--accent-red); }
     .btn-danger:hover { background: rgba(244, 63, 94, 0.15); border-color: var(--accent-red); color: var(--accent-red); }
 
+    /* TOGGLE SWITCH ON/OFF UI */
+    .toggle-container { display: flex; align-items: center; gap: 0.6rem; background: rgba(18, 26, 43, 0.9); padding: 0.4rem 0.8rem; border-radius: 12px; border: 1px solid var(--card-border); }
+    .toggle-label { font-size: 0.8rem; font-weight: 700; color: var(--text-muted); }
+    .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #334155; transition: .3s; border-radius: 24px; }
+    .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
+    input:checked + .slider { background-color: var(--accent-green); }
+    input:checked + .slider:before { transform: translateX(20px); }
+
     .upstash-metrics-panel { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 2rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
     .up-metric-box { background: rgba(18, 26, 43, 0.6); border: 1px solid var(--card-border); border-radius: 12px; padding: 1rem 1.25rem; }
     .up-label { font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
@@ -308,6 +321,15 @@ module.exports = async (req, res) => {
         </div>
       </div>
       <div class="header-right">
+        <!-- TOGGLE ANALYTICS -->
+        <div class="toggle-container">
+          <span class="toggle-label">ANALYSIS</span>
+          <label class="switch">
+            <input type="checkbox" id="analyticsToggle" ${isAnalyticsOn ? 'checked' : ''} onchange="toggleSystemAnalytics(this)">
+            <span class="slider"></span>
+          </label>
+        </div>
+
         <button class="btn" onclick="window.location.reload()">🔄 Refresh /stats</button>
         <button class="btn btn-danger" onclick="confirmReset()">🗑️ /reset Database</button>
         <button class="btn" onclick="logout()">🚪 Logout</button>
@@ -387,7 +409,7 @@ module.exports = async (req, res) => {
         <canvas id="barChart" height="120"></canvas>
       </div>
       <div class="chart-card">
-        <div class="chart-title">🎯 Distribusi Gems Per Akun</div>
+          <div class="chart-title">🎯 Distribusi Gems Per Akun</div>
         <canvas id="doughnutChart" height="220"></canvas>
       </div>
     </div>
@@ -470,6 +492,27 @@ module.exports = async (req, res) => {
 
   <script>
     setTimeout(() => { window.location.reload(); }, 30000);
+
+    async function toggleSystemAnalytics(el) {
+      const isChecked = el.checked;
+      try {
+        const res = await fetch('/api/system', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: isChecked })
+        });
+        const data = await res.json();
+        if (res.ok) {
+          alert(isChecked ? '🟢 Analisis system telah DIAKTIFKAN!' : '🔴 Analisis system telah DIMATIKAN!');
+        } else {
+          el.checked = !isChecked;
+          alert('❌ Gagal mengubah status sistem.');
+        }
+      } catch (e) {
+        el.checked = !isChecked;
+        alert('❌ Koneksi gagal.');
+      }
+    }
 
     async function logout() {
       await fetch('/api/dashboard', {
