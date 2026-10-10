@@ -14,7 +14,6 @@ async function redisCmd(command, ...args) {
     });
     return (await res.json()).result;
   } catch (e) {
-    console.error('Redis Exec Error:', e);
     return null;
   }
 }
@@ -31,31 +30,21 @@ async function sendTelegramAlert(message) {
         parse_mode: 'HTML'
       })
     });
-  } catch (e) {
-    console.error('Telegram Error:', e);
-  }
+  } catch (e) {}
 }
 
-function cleanText(str) {
+function cleanStr(str) {
   if (!str) return '';
-  return String(str)
-    .replace(/[\*_~`#]/g, '')
-    .replace(/Completed!/gi, '')
-    .replace(/Name:/gi, '')
-    .replace(/Floor Reached/gi, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return String(str).replace(/[\*_~`#]/g, '').trim();
 }
 
 module.exports = async (req, res) => {
-  // Pengecekan via Browser (GET)
   if (req.method === 'GET') {
     const statusRes = await redisCmd('get', 'system:analytics_status');
     return res.status(200).json({
       success: true,
       service: 'Webhook Gateway Active',
       status: statusRes !== 'disabled' ? 'ONLINE' : 'OFFLINE (Analytics Disabled)',
-      redisConnected: !!CONFIG.REDIS_URL,
       timestamp: new Date().toISOString()
     });
   }
@@ -67,7 +56,6 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true, message: 'Analytics System IS OFF' });
       }
 
-      // Pastikan body ter-parse dengan baik
       let body = req.body;
       if (typeof body === 'string') {
         try { body = JSON.parse(body); } catch(e) {}
@@ -77,14 +65,12 @@ module.exports = async (req, res) => {
       const payloadStr = JSON.stringify(body);
       const byteLength = Buffer.byteLength(payloadStr, 'utf8');
 
-      // Tracker Global Upstash Persisten
       await redisCmd('incr', 'global:total_commands');
       await redisCmd('incrby', 'global:total_bytes', byteLength);
 
-      // Ekstraksi Teks Lengkap dari Seluruh Bagian Payload Discord
+      // Kumpulkan seluruh teks dari payload Discord
       let textChunks = [];
       if (body.content) textChunks.push(body.content);
-      if (body.username) textChunks.push(body.username);
 
       if (Array.isArray(body.embeds)) {
         body.embeds.forEach(e => {
@@ -101,26 +87,22 @@ module.exports = async (req, res) => {
         });
       }
 
-      const rawFullText = textChunks.join('\n');
-      const cleanFullText = cleanText(rawFullText);
+      const fullText = textChunks.join('\n');
 
-      // Tentukan Nama Akun / User
+      // 1. EKSTRAKSI USERNAME (Format: Username: Roblox Script)
       let username = 'Player';
-      if (body.username && body.username !== 'Webhook') {
-        username = cleanText(body.username);
-      } else if (body.embeds && body.embeds[0] && body.embeds[0].author && body.embeds[0].author.name) {
-        username = cleanText(body.embeds[0].author.name);
-      } else {
-        const uMatch = rawFullText.match(/(?:User|Player|Account|Nama)\s*[:=]?\s*([a-zA-Z0-9_]+)/i);
-        if (uMatch) username = uMatch[1];
+      const userMatch = fullText.match(/Username\s*:\s*([^\r\n]+)/i);
+      if (userMatch) {
+        username = cleanStr(userMatch[1]);
+      } else if (body.username && body.username !== 'Webhook') {
+        username = cleanStr(body.username);
       }
 
-      if (!username || username === 'UnknownUser') username = 'Player';
+      if (!username) username = 'Player';
 
       const prefix = `stats:${username}`;
       const now = Date.now();
 
-      // Pendaftaran Akun ke Index Stats Users
       await redisCmd('sadd', 'stats:users', username);
       await redisCmd('set', `${prefix}:lastSeen`, now);
 
@@ -133,55 +115,73 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // 1. Ekstraksi Gems
-      const gemsMatch = rawFullText.match(/(?:Gems|Gem)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
-      if (gemsMatch) {
-        const val = parseInt(gemsMatch[1].replace(/[,.]/g, ''), 10);
-        if (!isNaN(val) && val > 0) await redisCmd('incrby', `${prefix}:totalGems`, val);
-      }
+      // 2. EKSTRAKSI TOWER (Format: Name: Shadow Tower + Floor Reached: 150)
+      if (/Tower Completed!/i.test(fullText) || /Tower/i.test(fullText)) {
+        const towerNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
+        const floorMatch = fullText.match(/Floor Reached\s*:\s*([^\r\n]+)/i);
 
-      // 2. Ekstraksi Trait Reroll
-      const traitMatch = rawFullText.match(/(?:Trait|Reroll|Trait Reroll)\s*[:+=]?\s*x?\s*([\d,.]+)/i);
-      if (traitMatch) {
-        const val = parseInt(traitMatch[1].replace(/[,.]/g, ''), 10);
-        if (!isNaN(val) && val > 0) await redisCmd('incrby', `${prefix}:totalTraitReroll`, val);
-      }
+        if (towerNameMatch) {
+          let towerDisplayName = cleanStr(towerNameMatch[1]);
+          if (floorMatch) {
+            towerDisplayName += ` (Floor ${cleanStr(floorMatch[1])})`;
+          }
 
-      // 3. Ekstraksi Unit Diterima & Telegram Notif
-      const unitMatches = [...rawFullText.matchAll(/(?:Got Unit|Received Unit|Dapat Unit|Unit)\s*[:=]?\s*([^\n\r,]+)/gi)];
-      for (const m of unitMatches) {
-        const item = cleanText(m[1]);
-        if (item) {
-          await redisCmd('rpush', `${prefix}:unitsReceived`, item);
-          await sendTelegramAlert(`🎲 <b>LAPORAN UNIT DITERIMA!</b>\n\n👤 Akun: <b>${username}</b>\n🎁 Unit: <b>${item}</b>`);
-        }
-      }
-
-      // 4. Ekstraksi Tower / Floor Selesai
-      const towerMatches = [...rawFullText.matchAll(/(?:Tower|Floor|Lantai)\s*[:=]?\s*([^\n\r,]+)/gi)];
-      for (const m of towerMatches) {
-        const item = cleanText(m[1]);
-        if (item) {
-          await redisCmd('rpush', `${prefix}:towerList`, item);
+          await redisCmd('rpush', `${prefix}:towerList`, towerDisplayName);
           await redisCmd('incr', `${prefix}:towerSelesai`);
-          await sendTelegramAlert(`🏆 <b>TOWER / FLOOR SELESAI!</b>\n\n👤 Akun: <b>${username}</b>\n🏰 Tower: <b>${item}</b>`);
+
+          await sendTelegramAlert(
+            `🏆 <b>TOWER COMPLETED!</b>\n\n` +
+            `👤 Akun: <b>${username}</b>\n` +
+            `🏰 Tower: <b>${towerDisplayName}</b>`
+          );
         }
       }
 
-      // 5. Ekstraksi Potion / Item
-      const potionMatches = [...rawFullText.matchAll(/(?:Potion|Item|Boost)\s*([a-zA-Z0-9\s]+?)\s*x\s*([\d,.]+)/gi)];
-      for (const m of potionMatches) {
-        const pName = cleanText(m[1]);
-        const pQty = parseInt(m[2].replace(/[,.]/g, ''), 10);
-        if (pName && !isNaN(pQty) && pQty > 0) {
-          await redisCmd('hincrby', `${prefix}:potions`, pName, pQty);
+      // 3. EKSTRAKSI UNIT (Format: New Unit! / HIGH-VALUE DROP DETECTED -> Name: Ruby Huge Dio)
+      if (/New Unit!/i.test(fullText) || /HIGH-VALUE DROP/i.test(fullText)) {
+        const unitNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
+        const rarityMatch = fullText.match(/Rarity\s*:\s*([^\r\n]+)/i);
+
+        if (unitNameMatch) {
+          let unitDisplayName = cleanStr(unitNameMatch[1]);
+          if (rarityMatch) {
+            unitDisplayName += ` [${cleanStr(rarityMatch[1])}]`;
+          }
+
+          await redisCmd('rpush', `${prefix}:unitsReceived`, unitDisplayName);
+
+          await sendTelegramAlert(
+            `🚨 <b>[HIGH-VALUE DROP DETECTED]</b> 🚨\n\n` +
+            `👤 Akun: <b>${username}</b>\n` +
+            `🎁 Unit: <b>${unitDisplayName}</b>`
+          );
         }
       }
 
-      return res.status(200).json({ success: true, processedUser: username });
+      // 4. EKSTRAKSI DROPS (Gems, Trait Reroll, Potions & Buff Items)
+      // Format: NamaItem: xJumlah (Contoh: Gems: x50, Shadow Income I: x1)
+      const dropMatches = [...fullText.matchAll(/([a-zA-Z0-9\s]+)\s*:\s*x([\d,.]+)/gi)];
+
+      for (const match of dropMatches) {
+        const itemName = cleanStr(match[1]);
+        const qty = parseInt(match[2].replace(/[,.]/g, ''), 10);
+
+        if (itemName && !isNaN(qty) && qty > 0) {
+          if (/^Gems$/i.test(itemName)) {
+            await redisCmd('incrby', `${prefix}:totalGems`, qty);
+          } else if (/^Trait Reroll$/i.test(itemName)) {
+            await redisCmd('incrby', `${prefix}:totalTraitReroll`, qty);
+          } else {
+            // Item / Potions / Buffs lainnya
+            await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
+          }
+        }
+      }
+
+      return res.status(200).json({ success: true, user: username });
     } catch (err) {
       console.error('Webhook Error:', err);
-      return res.status(500).json({ error: 'Internal Server Error', details: err.message });
+      return res.status(500).json({ error: 'Internal Server Error' });
     }
   }
 
