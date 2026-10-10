@@ -7,6 +7,7 @@ const CONFIG = {
 };
 
 const TTL_5_HOURS = 18000;
+const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000;
 
 function getCurrentTimeWIB() {
   return new Date().toLocaleString('id-ID', {
@@ -22,18 +23,20 @@ function getCurrentTimeWIB() {
 
 function extractCleanUsername(rawName, fullText) {
   if (!fullText) fullText = '';
-  const bodyUserMatch = fullText.match(/Username:\s*\|\|([^|]+)\|\|/i);
+  const cleanText = fullText.replace(/\*\*/g, '');
+
+  const bodyUserMatch = cleanText.match(/Username:\s*\|\|([^|]+)\|\|/i);
   if (bodyUserMatch) {
     return bodyUserMatch[1].trim();
   }
 
-  const plainUserMatch = fullText.match(/Username:\s*([^\r\n]+)/i);
+  const plainUserMatch = cleanText.match(/Username:\s*([^\r\n]+)/i);
   if (plainUserMatch) {
     return plainUserMatch[1].replace(/\|\|/g, '').trim();
   }
 
   if (rawName) {
-    return rawName.replace(/\|\|/g, '').trim();
+    return rawName.replace(/\|\|/g, '').replace(/\*\*/g, '').trim();
   }
 
   return 'Roblox Script';
@@ -54,11 +57,45 @@ async function redisCmd(command, ...args) {
   }
 }
 
+async function checkOfflineAccounts(currentActiveUser) {
+  let users = await redisCmd('smembers', 'stats:users');
+  if (!Array.isArray(users)) users = users ? [users] : [];
+
+  const now = Date.now();
+
+  for (const user of users) {
+    if (user === currentActiveUser) continue;
+
+    const prefix = `stats:${user}`;
+    const lastSeen = await redisCmd('get', `${prefix}:lastSeen`);
+    const isAlerted = await redisCmd('get', `${prefix}:offlineAlerted`);
+
+    if (lastSeen) {
+      const timeDiff = now - parseInt(lastSeen, 10);
+      if (timeDiff > OFFLINE_THRESHOLD_MS && !isAlerted) {
+        const offlineMinutes = Math.floor(timeDiff / (1000 * 60));
+        const alertMsg = `🚨 *[ALERT AKUN OFFLINE]*\n\n` +
+          `👤 Akun: *${user}*\n` +
+          `⚠️ Status: Tidak ada laporan masuk selama *${offlineMinutes} menit*!\n` +
+          `Mohon periksa emulator atau koneksi device Anda.`;
+
+        await sendTelegramMessage(CONFIG.CHAT_ID, alertMsg);
+        await redisCmd('set', `${prefix}:offlineAlerted`, 'true');
+        await redisCmd('expire', `${prefix}:offlineAlerted`, 3600);
+      }
+    }
+  }
+}
+
 async function scanAndAccumulate(user, text) {
   if (!text) return;
 
   const prefix = `stats:${user}`;
   const now = Date.now();
+
+  await redisCmd('set', `${prefix}:lastSeen`, now);
+  await redisCmd('expire', `${prefix}:lastSeen`, TTL_5_HOURS);
+  await redisCmd('del', `${prefix}:offlineAlerted`);
 
   await redisCmd('incrby', `${prefix}:totalLaporan`, 1);
   await redisCmd('expire', `${prefix}:totalLaporan`, TTL_5_HOURS);
@@ -72,31 +109,34 @@ async function scanAndAccumulate(user, text) {
     await redisCmd('expire', `${prefix}:startTime`, TTL_5_HOURS);
   }
 
-  const isUnitMessage = /new unit|unit received|got unit|received unit|unit:/i.test(text);
-  if (isUnitMessage) {
-    await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
-    await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
+  const cleanText = text.replace(/\*\*/g, '');
 
-    const nameMatch = text.match(/(?:Name|Unit):\s*([^\r\n]+)/i);
-    const mutationMatch = text.match(/Mutation:\s*([^\r\n]+)/i);
-    const rarityMatch = text.match(/Rarity:\s*([^\r\n]+)/i);
+  const nameMatch = cleanText.match(/(?:Name|Unit):\s*([^\r\n]+)/i);
+  if (nameMatch) {
+    const rawUnitName = nameMatch[1].replace(/\|\|/g, '').trim();
 
-    if (nameMatch) {
-      let unitInfo = nameMatch[1].replace(/\|\|/g, '').trim();
+    if (rawUnitName && !['roblox script', 'stats', 'webhook'].includes(rawUnitName.toLowerCase())) {
+      const mutationMatch = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
+      const rarityMatch = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
+
+      let unitInfo = rawUnitName;
       if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
       if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
+
+      await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
+      await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
 
       await redisCmd('rpush', `${prefix}:unitsReceived`, unitInfo);
       await redisCmd('expire', `${prefix}:unitsReceived`, TTL_5_HOURS);
     }
   }
 
-  if (/tower completed/i.test(text)) {
+  if (/tower completed/i.test(cleanText)) {
     await redisCmd('incrby', `${prefix}:towerSelesai`, 1);
     await redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS);
   }
 
-  const gemsMatch = text.match(/Gems:\s*x?([\d,]+)/i);
+  const gemsMatch = cleanText.match(/Gems:\s*x?([\d,]+)/i);
   if (gemsMatch) {
     const gemsVal = parseInt(gemsMatch[1].replace(/,/g, ''), 10);
     if (!isNaN(gemsVal)) {
@@ -105,7 +145,7 @@ async function scanAndAccumulate(user, text) {
     }
   }
 
-  const traitMatch = text.match(/Trait Reroll:\s*x?([\d,]+)/i);
+  const traitMatch = cleanText.match(/Trait Reroll:\s*x?([\d,]+)/i);
   if (traitMatch) {
     const traitVal = parseInt(traitMatch[1].replace(/,/g, ''), 10);
     if (!isNaN(traitVal)) {
@@ -114,18 +154,20 @@ async function scanAndAccumulate(user, text) {
     }
   }
 
-  const lines = text.split('\n');
+  const lines = cleanText.split('\n');
   for (const line of lines) {
     const itemMatch = line.match(/([A-Za-z0-9'\s]+):\s*x([\d,]+)/);
     if (itemMatch) {
       const itemName = itemMatch[1].trim();
       const qty = parseInt(itemMatch[2].replace(/,/g, ''), 10);
-      if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached'].includes(itemName) && !isNaN(qty)) {
+      if (!['Gems', 'Trait Reroll', 'Level', 'Floor Reached', 'Name', 'Rarity', 'Tier', 'Grade'].includes(itemName) && !isNaN(qty)) {
         await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
         await redisCmd('expire', `${prefix}:potions`, TTL_5_HOURS);
       }
     }
   }
+
+  await checkOfflineAccounts(user);
 }
 
 function checkRareAlert(text) {
@@ -146,6 +188,41 @@ function parseDiscordEmbed(embed) {
     parts.push(fieldsText);
   }
   return parts.join('\n\n');
+}
+
+function formatCategorizedItems(potionsObj) {
+  const keys = Object.keys(potionsObj).sort((a, b) => a.localeCompare(b));
+  if (keys.length === 0) return '  *Item / Potion Diterima:*\n    • Belum ada';
+
+  const potions = [];
+  const keysTickets = [];
+  const materials = [];
+
+  for (const item of keys) {
+    const lower = item.toLowerCase();
+    const formatted = `    • ${item}: x${potionsObj[item]}`;
+
+    if (lower.includes('potion') || lower.includes('income') || lower.includes('luck') || lower.includes('boost') || lower.includes('exp')) {
+      potions.push(formatted);
+    } else if (lower.includes('key') || lower.includes('ticket') || lower.includes('pass')) {
+      keysTickets.push(formatted);
+    } else {
+      materials.push(formatted);
+    }
+  }
+
+  let output = '';
+  if (potions.length > 0) {
+    output += `  🧪 *Potions & Boosts:*\n${potions.join('\n')}\n`;
+  }
+  if (keysTickets.length > 0) {
+    output += `  🔑 *Keys & Tickets:*\n${keysTickets.join('\n')}\n`;
+  }
+  if (materials.length > 0) {
+    output += `  📦 *Chests & Materials:*\n${materials.join('\n')}\n`;
+  }
+
+  return output.trimEnd();
 }
 
 async function sendTelegramMessage(chatId, text) {
@@ -222,7 +299,7 @@ module.exports = async (req, res) => {
 
         if (isPending) {
           await redisCmd('flushall');
-          await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
+          await sendTelegramMessage(chatId, `dibatalkan\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
         } else {
           await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset terlebih dahulu.`);
         }
@@ -277,20 +354,14 @@ module.exports = async (req, res) => {
             Object.assign(potionsObj, potionsRaw);
           }
 
-          let itemList = 'Belum ada';
-          const sortedItems = Object.keys(potionsObj).sort((a, b) => a.localeCompare(b));
-          if (sortedItems.length > 0) {
-            itemList = sortedItems
-              .map(name => `    • ${name}: x${potionsObj[name]}`)
-              .join('\n');
-          }
-
           let unitList = 'Belum ada';
           if (unitsReceived.length > 0) {
             unitList = unitsReceived
               .map(u => `    • ${u}`)
               .join('\n');
           }
+
+          const categorizedItemsText = formatCategorizedItems(potionsObj);
 
           reportText += `👤 *Akun: ${user}*\n` +
             `  • Total Laporan Diproses: *${totalLaporan}*\n` +
@@ -302,7 +373,7 @@ module.exports = async (req, res) => {
             `    • ~${gemsPerHour} Gems/Jam\n` +
             `    • ~${traitPerHour} Trait/Jam\n` +
             `  *Daftar Unit Diterima:*\n${unitList}\n` +
-            `  *Item / Potion Diterima:*\n${itemList}\n────────────────\n`;
+            `${categorizedItemsText}\n────────────────\n`;
         }
 
         await sendTelegramMessage(chatId, reportText);
