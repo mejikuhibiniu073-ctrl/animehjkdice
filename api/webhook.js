@@ -148,27 +148,6 @@ function parseDiscordEmbed(embed) {
   return parts.join('\n\n');
 }
 
-function generateSmartInsights(gemsPerHour, traitPerHour, totalLaporan, unitCount) {
-  const insights = [];
-  if (gemsPerHour > 300) {
-    insights.push('🔥 Performa farming Gems sangat tinggi.');
-  } else if (gemsPerHour < 100) {
-    insights.push('⚠️ Performa Gems tergolong rendah.');
-  } else {
-    insights.push('✅ Kecepatan farming Gems stabil.');
-  }
-
-  if (traitPerHour > 100) {
-    insights.push('⚡ Trait Reroll terkumpul sangat cepat.');
-  }
-
-  if (unitCount > 0) {
-    insights.push(`🎉 Berhasil mendapatkan ${unitCount} unit baru.`);
-  }
-
-  return insights.join('\n    • ');
-}
-
 async function sendTelegramMessage(chatId, text) {
   const url = `${CONFIG.TELEGRAM_BASE_URL}${CONFIG.BOT_TOKEN}/sendMessage`;
   try {
@@ -243,7 +222,7 @@ module.exports = async (req, res) => {
 
         if (isPending) {
           await redisCmd('flushall');
-          await sendTelegramMessage(chatId, `dibatalkan\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
+          await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
         } else {
           await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset terlebih dahulu.`);
         }
@@ -313,8 +292,6 @@ module.exports = async (req, res) => {
               .join('\n');
           }
 
-          const smartInsights = generateSmartInsights(gemsPerHour, traitPerHour, totalLaporan, unitsReceived.length);
-
           reportText += `👤 *Akun: ${user}*\n` +
             `  • Total Laporan Diproses: *${totalLaporan}*\n` +
             `  • Unit Masuk Tas: *${unitMasukTas}*\n` +
@@ -324,8 +301,6 @@ module.exports = async (req, res) => {
             `  📈 *Estimasi Rate / Jam:*\n` +
             `    • ~${gemsPerHour} Gems/Jam\n` +
             `    • ~${traitPerHour} Trait/Jam\n` +
-            `  💡 *Smart Insights:*\n` +
-            `    • ${smartInsights}\n` +
             `  *Daftar Unit Diterima:*\n${unitList}\n` +
             `  *Item / Potion Diterima:*\n${itemList}\n────────────────\n`;
         }
@@ -383,4 +358,3 @@ module.exports = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
-                               
