@@ -72,6 +72,8 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, redirect: '/api/login' });
     }
 
+    // RESET DB: HANYA MEMBERSIHKAN STATISTIK AKUN USER
+    // COMMANDS DANK BANDWIDTH (global:total_commands & global:total_bytes) TIDAK DIRESET!
     if (req.method === 'POST' && body.action === 'reset') {
       const usersRes = await redisCmd('smembers', 'stats:users');
       const users = usersRes.result || [];
@@ -98,12 +100,10 @@ module.exports = async (req, res) => {
       }
 
       await redisCmd('del', 'stats:users');
-      await redisCmd('set', 'global:total_commands', '0');
-      await redisCmd('set', 'global:total_bytes', '0');
 
       return res.status(200).json({ 
         success: true, 
-        message: 'Seluruh statistik akun dan storage tracker berhasil dibersihkan!' 
+        message: 'Seluruh statistik akun berhasil dibersihkan! (Data Commands & Bandwidth tetap dipertahankan)' 
       });
     }
 
