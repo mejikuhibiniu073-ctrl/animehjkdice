@@ -37,16 +37,32 @@ async function sendTelegramAlert(message) {
 
 function cleanStr(str) {
   if (!str) return '';
-  return String(str).replace(/[\*_~`#]/g, '').trim();
+  return String(str).replace(/[\*_~`#\|]/g, '').trim();
 }
 
-// Menu Awal Commands List (/info)
-const INFO_COMMANDS_MENU = 
-  `\n\nℹ️ <b>/info - COMMANDS AVAILABLE:</b>\n` +
-  `• <code>/info</code> - Menampilkan menu bantuan & daftar perintah\n` +
-  `• <code>/stats</code> - Melihat statistik akun & aktivitas player\n` +
-  `• <code>/tower</code> - Ringkasan histori penyelesaian tower\n` +
-  `• <code>/unit</code> - Ringkasan histori unit rare yang didapatkan`;
+function getFormattedTime() {
+  const now = new Date();
+  const options = {
+    timeZone: 'Asia/Jakarta',
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  };
+  const formatter = new Intl.DateTimeFormat('id-ID', options);
+  return formatter.format(now).replace(/\./g, ':') + ' WIB';
+}
+
+const COMMANDS_MENU_TEXT = 
+  `\n\nℹ️ <b>COMMANDS AVAILABLE:</b>\n` +
+  `• <code>/p</code> - Menampilkan menu daftar perintah ini\n` +
+  `• <code>/info</code> - Menampilkan status sistem real-time\n` +
+  `• <code>/stats</code> - Melihat ringkasan statistik akun\n` +
+  `• <code>/tower</code> - Histori penyelesaian tower\n` +
+  `• <code>/unit</code> - Histori unit rare`;
 
 module.exports = async (req, res) => {
   if (req.method === 'GET') {
@@ -74,12 +90,11 @@ module.exports = async (req, res) => {
 
       const payloadStr = JSON.stringify(body);
       const byteLength = Buffer.byteLength(payloadStr, 'utf8');
+      const signalTime = getFormattedTime();
 
-      // Tracker Global (Tidak ter-reset saat reset DB)
       await redisCmd('incr', 'global:total_commands');
       await redisCmd('incrby', 'global:total_bytes', byteLength);
 
-      // Kumpulkan seluruh teks laporan dari webhook Discord
       let textChunks = [];
       if (body.content) textChunks.push(body.content);
 
@@ -99,8 +114,9 @@ module.exports = async (req, res) => {
       }
 
       const fullText = textChunks.join('\n');
+      const isCmdP = /\/p\b/i.test(fullText);
 
-      // 1. Ekstrak Username (Format: Username: Roblox Script)
+      // 1. Ekstrak Username
       let username = 'Player';
       const userMatch = fullText.match(/Username\s*:\s*([^\r\n]+)/i);
       if (userMatch) {
@@ -126,7 +142,29 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // 2. Ekstrak Tower & Floor (Format Telegram: 🏆 TOWER COMPLETED)
+      // 2. Ekstrak Drops & Items (Tanpa Pengurangan Data)
+      const dropMatches = [...fullText.matchAll(/([a-zA-Z0-9\s]+)\s*:\s*x([\d,.]+)/gi)];
+      let dropsListText = [];
+
+      for (const match of dropMatches) {
+        const itemName = cleanStr(match[1]);
+        const qty = parseInt(match[2].replace(/[,.]/g, ''), 10);
+
+        if (itemName && !isNaN(qty) && qty > 0) {
+          if (/^Gems$/i.test(itemName)) {
+            await redisCmd('incrby', `${prefix}:totalGems`, qty);
+            dropsListText.push(`• Gems: x${qty.toLocaleString('id-ID')}`);
+          } else if (/^Trait Reroll$/i.test(itemName)) {
+            await redisCmd('incrby', `${prefix}:totalTraitReroll`, qty);
+            dropsListText.push(`• Trait Reroll: x${qty.toLocaleString('id-ID')}`);
+          } else {
+            await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
+            dropsListText.push(`• ${itemName}: x${qty}`);
+          }
+        }
+      }
+
+      // 3. Laporan Tower Completed
       if (/Tower Completed!/i.test(fullText) || /Tower/i.test(fullText)) {
         const towerNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
         const floorMatch = fullText.match(/Floor Reached\s*:\s*([\d]+)/i);
@@ -136,20 +174,28 @@ module.exports = async (req, res) => {
           const fNumber = floorMatch ? floorMatch[1] : '1';
           const towerDisplayName = `${tName} (Floor ${fNumber})`;
 
-          // Simpan ke Redis untuk tampilan UI Dashboard
           await redisCmd('rpush', `${prefix}:towerList`, towerDisplayName);
           await redisCmd('incr', `${prefix}:towerSelesai`);
 
-          // Kirim Alert Rapi ke Telegram
+          const dropsFormatted = dropsListText.length > 0 
+            ? `\n🎁 <b>Drops Obtained:</b>\n` + dropsListText.join('\n')
+            : '';
+
+          const commandsFooter = isCmdP ? COMMANDS_MENU_TEXT : '';
+
           await sendTelegramAlert(
             `🏆 <b>TOWER COMPLETED</b>\n\n` +
-            `👤 <b>${username}</b> | <b>${tName}</b> | <b>Floor ${fNumber}</b>` +
-            INFO_COMMANDS_MENU
+            `👤 <b>Akun:</b> ${username}\n` +
+            `🕒 <b>Waktu:</b> ${signalTime}\n` +
+            `🏰 <b>Tower:</b> ${tName}\n` +
+            `🪜 <b>Floor:</b> ${fNumber}` +
+            dropsFormatted +
+            commandsFooter
           );
         }
       }
 
-      // 3. Ekstrak Unit Rare (Format Telegram: 🚨 UNIT RARE DETECTED)
+      // 4. Laporan Unit Rare
       if (/New Unit!/i.test(fullText) || /HIGH-VALUE DROP/i.test(fullText)) {
         const unitNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
         const rarityMatch = fullText.match(/Rarity\s*:\s*([^\r\n]+)/i);
@@ -159,37 +205,31 @@ module.exports = async (req, res) => {
           const rarity = rarityMatch ? cleanStr(rarityMatch[1]) : '';
           const unitDisplayName = rarity ? `${uName} [${rarity}]` : uName;
 
-          // Simpan ke Redis untuk tampilan UI Dashboard
           await redisCmd('rpush', `${prefix}:unitsReceived`, unitDisplayName);
 
-          // Kirim Alert Rapi ke Telegram
+          const commandsFooter = isCmdP ? COMMANDS_MENU_TEXT : '';
+
           await sendTelegramAlert(
             `🚨 <b>UNIT RARE DETECTED</b>\n\n` +
-            `👤 <b>${username}</b> | <b>${unitDisplayName}</b>` +
-            INFO_COMMANDS_MENU
+            `👤 <b>Akun:</b> ${username}\n` +
+            `🕒 <b>Waktu:</b> ${signalTime}\n` +
+            `🎁 <b>Unit:</b> ${unitDisplayName}` +
+            commandsFooter
           );
         }
       }
 
-      // 4. Ekstrak Items, Gems, Trait Reroll, & Buff Potions Anime Dice Roblox
-      const dropMatches = [...fullText.matchAll(/([a-zA-Z0-9\s]+)\s*:\s*x([\d,.]+)/gi)];
-
-      for (const match of dropMatches) {
-        const itemName = cleanStr(match[1]);
-        const qty = parseInt(match[2].replace(/[,.]/g, ''), 10);
-
-        if (itemName && !isNaN(qty) && qty > 0) {
-          if (/^Gems$/i.test(itemName)) {
-            await redisCmd('incrby', `${prefix}:totalGems`, qty);
-          } else if (/^Trait Reroll$/i.test(itemName)) {
-            await redisCmd('incrby', `${prefix}:totalTraitReroll`, qty);
-          } else {
-            await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
-          }
-        }
+      // 5. Perintah Standalone /p
+      if (isCmdP && !/Tower/i.test(fullText) && !/New Unit!/i.test(fullText)) {
+        await sendTelegramAlert(
+          `🤖 <b>BOT MONITORING ACTIVE</b>\n\n` +
+          `👤 <b>User:</b> ${username}\n` +
+          `🕒 <b>Waktu Sinyal:</b> ${signalTime}` +
+          COMMANDS_MENU_TEXT
+        );
       }
 
-      return res.status(200).json({ success: true, user: username });
+      return res.status(200).json({ success: true, user: username, timestamp: signalTime });
     } catch (err) {
       console.error('Webhook Error:', err);
       return res.status(500).json({ error: 'Internal Server Error' });
