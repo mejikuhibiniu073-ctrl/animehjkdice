@@ -37,9 +37,6 @@ module.exports = async (req, res) => {
     const gemsPerHour = Math.round(totalGems / durationHours);
     const traitPerHour = Math.round(totalTrait / durationHours);
 
-    // Cek keaktifan akun (jika durasi awal < 5 jam)
-    const isOnline = (now - startTime) < (5 * 60 * 60 * 1000);
-
     grandTotalGems += totalGems;
     grandTotalTrait += totalTrait;
     totalLaporanSemua += totalLaporan;
@@ -50,8 +47,7 @@ module.exports = async (req, res) => {
       totalGems,
       totalTrait,
       gemsPerHour,
-      traitPerHour,
-      isOnline
+      traitPerHour
     });
   }
 
@@ -61,7 +57,7 @@ module.exports = async (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Roblox Webhook Command Center</title>
+  <title>Roblox Webhook Command Center & Tester</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
@@ -98,35 +94,41 @@ module.exports = async (req, res) => {
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
     .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); position: relative; overflow: hidden; transition: all 0.3s ease; }
     .stat-card:hover { border-color: rgba(56, 189, 248, 0.3); transform: translateY(-2px); }
-    .stat-card::before { content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 2px; background: linear-gradient(90deg, transparent, var(--accent-blue), transparent); opacity: 0; transition: opacity 0.3s; }
-    .stat-card:hover::before { opacity: 1; }
     .stat-label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
     .stat-value { font-size: 2rem; font-weight: 800; margin-top: 0.5rem; letter-spacing: -0.02em; }
     .val-gems { color: var(--accent-blue); text-shadow: 0 0 20px rgba(56, 189, 248, 0.3); }
     .val-trait { color: var(--accent-purple); text-shadow: 0 0 20px rgba(192, 132, 252, 0.3); }
 
+    /* Webhook Tester Console */
+    .tester-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); margin-bottom: 2rem; }
+    .tester-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; color: var(--accent-blue); display: flex; align-items: center; gap: 0.5rem; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+    .form-group { display: flex; flex-direction: column; gap: 0.4rem; }
+    .form-group label { font-size: 0.8rem; color: var(--text-muted); font-weight: 600; }
+    .input-field, .select-field, .textarea-field { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 0.8rem; border-radius: 8px; font-size: 0.85rem; outline: none; transition: border-color 0.2s; }
+    .input-field:focus, .select-field:focus, .textarea-field:focus { border-color: var(--accent-blue); }
+    .textarea-field { resize: vertical; min-height: 80px; font-family: monospace; }
+    .btn-send { background: linear-gradient(135deg, var(--accent-blue), #0284c7); color: #fff; border: none; padding: 0.75rem 1.5rem; border-radius: 10px; font-weight: 700; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; }
+    .btn-send:hover { opacity: 0.9; transform: translateY(-1px); }
+    .log-box { background: rgba(8, 12, 20, 0.9); border: 1px solid var(--card-border); border-radius: 8px; padding: 0.8rem; margin-top: 1rem; font-family: monospace; font-size: 0.8rem; color: var(--accent-green); display: none; }
+
     /* Visual Charts Section */
     .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.25rem; margin-bottom: 2rem; }
     .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
-    .chart-title { font-size: 1rem; font-weight: 700; color: var(--text-main); margin-bottom: 1.25rem; display: flex; justify-content: space-between; align-items: center; }
+    .chart-title { font-size: 1rem; font-weight: 700; color: var(--text-main); margin-bottom: 1.25rem; }
 
     /* Interactive Data Table */
     .table-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); overflow: hidden; }
     .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 1rem; }
-    .search-input { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 1rem; border-radius: 10px; font-size: 0.85rem; outline: none; width: 250px; transition: border-color 0.2s; }
-    .search-input:focus { border-color: var(--accent-blue); }
+    .search-input { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 1rem; border-radius: 10px; font-size: 0.85rem; outline: none; width: 250px; }
 
     .table-wrapper { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.9rem; }
-    th { padding: 1rem; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--card-border); }
+    th { padding: 1rem; color: var(--text-muted); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; border-bottom: 1px solid var(--card-border); }
     td { padding: 1.1rem 1rem; border-bottom: 1px solid rgba(255, 255, 255, 0.03); color: var(--text-main); }
-    tr:hover td { background: rgba(255, 255, 255, 0.02); }
     
-    .status-pill { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.6rem; border-radius: 6px; font-size: 0.75rem; font-weight: 600; }
-    .status-online { background: rgba(52, 211, 153, 0.1); color: var(--accent-green); }
-
     @media (max-width: 900px) {
-      .charts-grid { grid-template-columns: 1fr; }
+      .charts-grid, .form-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -139,11 +141,11 @@ module.exports = async (req, res) => {
         <div class="brand-logo">R</div>
         <div class="brand-text">
           <h1>Command Center</h1>
-          <p>Real-Time Roblox Farming Analytics</p>
+          <p>Real-Time Roblox Farming Analytics & Webhook Tester</p>
         </div>
       </div>
       <div class="header-controls">
-        <button class="btn-refresh" onclick="window.location.reload()">🔄 Refresh</button>
+        <button class="btn-refresh" onclick="window.location.reload()">🔄 Refresh Data</button>
         <div class="status-badge">
           <div class="pulse-dot"></div> LIVE MONITORING
         </div>
@@ -170,18 +172,43 @@ module.exports = async (req, res) => {
       </div>
     </div>
 
+    <!-- Webhook Tester Console Section -->
+    <div class="tester-card">
+      <div class="tester-title">🧪 Live Webhook Tester Console</div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Username Test</label>
+          <input type="text" id="testUser" class="input-field" value="TestAccount_01">
+        </div>
+        <div class="form-group">
+          <label>Tipe Event Webhook</label>
+          <select id="testType" class="select-field" onchange="updatePresetPayload()">
+            <option value="normal">Normal Report (Gems & Items)</option>
+            <option value="unit">New Unit Drop</option>
+            <option value="tower">Tower Completed</option>
+            <option value="error">Error Log Alert</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom: 1rem;">
+        <label>Payload Content (Teks Simulasi Webhook)</label>
+        <textarea id="testContent" class="textarea-field">Tower Completed!
+Gems: x150
+Trait Reroll: x10
+Shadow Income I: x2</textarea>
+      </div>
+      <button class="btn-send" onclick="sendTestWebhook()">🚀 Kirim Payload Simulasi</button>
+      <div id="logBox" class="log-box"></div>
+    </div>
+
     <!-- Charts Section -->
     <div class="charts-grid">
       <div class="chart-card">
-        <div class="chart-title">
-          <span>📊 Hasil Farming Per Akun</span>
-        </div>
+        <div class="chart-title">📊 Hasil Farming Per Akun</div>
         <canvas id="barChart" height="110"></canvas>
       </div>
       <div class="chart-card">
-        <div class="chart-title">
-          <span>🎯 Distribusi Gems</span>
-        </div>
+        <div class="chart-title">🎯 Distribusi Gems</div>
         <canvas id="doughnutChart" height="220"></canvas>
       </div>
     </div>
@@ -208,7 +235,7 @@ module.exports = async (req, res) => {
           <tbody>
             ${accountsData.length > 0 ? accountsData.map(acc => `
               <tr>
-                <td><span class="status-pill status-online">● Active</span></td>
+                <td><span style="color: var(--accent-green); font-weight: 700;">● Active</span></td>
                 <td style="font-weight: 700; color: var(--accent-blue);">👤 ${acc.user}</td>
                 <td>${acc.totalLaporan} log</td>
                 <td style="font-weight: 700; color: var(--accent-blue);">x${acc.totalGems.toLocaleString('id-ID')}</td>
@@ -232,7 +259,50 @@ module.exports = async (req, res) => {
     // Auto-Refresh tiap 30 detik
     setTimeout(() => { window.location.reload(); }, 30000);
 
-    // Filter Pencarian Tabel
+    function updatePresetPayload() {
+      const type = document.getElementById('testType').value;
+      const content = document.getElementById('testContent');
+
+      if (type === 'normal') {
+        content.value = "Tower Completed!\nGems: x150\nTrait Reroll: x10\nShadow Income I: x2";
+      } else if (type === 'unit') {
+        content.value = "New Unit!\nName: Gold Huge Friza\nMutation: Gold\nRarity: Secret";
+      } else if (type === 'tower') {
+        content.value = "Tower Completed!\nGems: x500\nTrait Reroll: x25";
+      } else if (type === 'error') {
+        content.value = "Script disconnected from server!";
+      }
+    }
+
+    async function sendTestWebhook() {
+      const user = document.getElementById('testUser').value || 'TestAccount_01';
+      const type = document.getElementById('testType').value;
+      const content = document.getElementById('testContent').value;
+      const logBox = document.getElementById('logBox');
+
+      logBox.style.display = 'block';
+      logBox.innerText = 'Mengirim payload simulasi...';
+
+      const payload = {
+        username: user,
+        event_type: type === 'error' ? 'error' : 'normal',
+        content: content
+      };
+
+      try {
+        const response = await fetch('/api/webhook', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+        logBox.innerText = '✅ Status ' + response.status + ' OK: ' + JSON.stringify(data) + '\nSilakan klik Refresh Data untuk melihat perubahan di dashboard.';
+      } catch (err) {
+        logBox.innerText = '❌ Error sending webhook: ' + err.message;
+      }
+    }
+
     function filterTable() {
       const input = document.getElementById('searchInput').value.toLowerCase();
       const rows = document.querySelectorAll('#accountsTable tbody tr');
@@ -242,13 +312,12 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Chart Configuration
+    // Chart Setup
     const rawData = ${JSON.stringify(accountsData)};
     const labels = rawData.map(d => d.user);
     const gemsData = rawData.map(d => d.totalGems);
     const traitData = rawData.map(d => d.totalTrait);
 
-    // Bar Chart
     const ctxBar = document.getElementById('barChart').getContext('2d');
     new Chart(ctxBar, {
       type: 'bar',
@@ -269,7 +338,6 @@ module.exports = async (req, res) => {
       }
     });
 
-    // Doughnut Chart
     const ctxDoughnut = document.getElementById('doughnutChart').getContext('2d');
     new Chart(ctxDoughnut, {
       type: 'doughnut',
