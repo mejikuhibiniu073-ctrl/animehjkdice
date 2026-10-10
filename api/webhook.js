@@ -40,13 +40,13 @@ function cleanStr(str) {
   return String(str).replace(/[\*_~`#]/g, '').trim();
 }
 
-// Daftar perintah yang tersedia untuk dicantumkan di Telegram
-const COMMANDS_LIST = 
-  `\n\n📌 <b>Perintah Yang Tersedia:</b>\n` +
-  `• <code>/info</code> - Ringkasan Laporan & Status Real-time\n` +
-  `• <code>/tower</code> - Laporan Selesai Tower & Floor\n` +
-  `• <code>/unit</code> - Laporan Unit / Drop Langka\n` +
-  `• <code>/stats</code> - Ringkasan Statistik Player`;
+// Menu Awal Commands List (/info)
+const INFO_COMMANDS_MENU = 
+  `\n\nℹ️ <b>/info - COMMANDS AVAILABLE:</b>\n` +
+  `• <code>/info</code> - Menampilkan menu bantuan & daftar perintah\n` +
+  `• <code>/stats</code> - Melihat statistik akun & aktivitas player\n` +
+  `• <code>/tower</code> - Ringkasan histori penyelesaian tower\n` +
+  `• <code>/unit</code> - Ringkasan histori unit rare yang didapatkan`;
 
 module.exports = async (req, res) => {
   if (req.method === 'GET') {
@@ -75,9 +75,11 @@ module.exports = async (req, res) => {
       const payloadStr = JSON.stringify(body);
       const byteLength = Buffer.byteLength(payloadStr, 'utf8');
 
+      // Tracker Global (Tidak ter-reset saat reset DB)
       await redisCmd('incr', 'global:total_commands');
       await redisCmd('incrby', 'global:total_bytes', byteLength);
 
+      // Kumpulkan seluruh teks laporan dari webhook Discord
       let textChunks = [];
       if (body.content) textChunks.push(body.content);
 
@@ -98,7 +100,7 @@ module.exports = async (req, res) => {
 
       const fullText = textChunks.join('\n');
 
-      // 1. Ekstrak Username (Format: Username: NamaAkun)
+      // 1. Ekstrak Username (Format: Username: Roblox Script)
       let username = 'Player';
       const userMatch = fullText.match(/Username\s*:\s*([^\r\n]+)/i);
       if (userMatch) {
@@ -124,29 +126,30 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // 2. Ekstrak Tower (Pesan Telegram diawali /info & /tower)
+      // 2. Ekstrak Tower & Floor (Format Telegram: 🏆 TOWER COMPLETED)
       if (/Tower Completed!/i.test(fullText) || /Tower/i.test(fullText)) {
         const towerNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
-        const floorMatch = fullText.match(/Floor Reached\s*:\s*([^\r\n]+)/i);
+        const floorMatch = fullText.match(/Floor Reached\s*:\s*([\d]+)/i);
 
         if (towerNameMatch) {
           const tName = cleanStr(towerNameMatch[1]);
-          const fNumber = floorMatch ? cleanStr(floorMatch[1]) : '1';
+          const fNumber = floorMatch ? floorMatch[1] : '1';
           const towerDisplayName = `${tName} (Floor ${fNumber})`;
 
+          // Simpan ke Redis untuk tampilan UI Dashboard
           await redisCmd('rpush', `${prefix}:towerList`, towerDisplayName);
           await redisCmd('incr', `${prefix}:towerSelesai`);
 
-          // Format Telegram dengan /info dan format [Nama Akun] | [Nama Tower] | [Floor]
+          // Kirim Alert Rapi ke Telegram
           await sendTelegramAlert(
-            `/info 🏆 <b>TOWER COMPLETED</b>\n\n` +
+            `🏆 <b>TOWER COMPLETED</b>\n\n` +
             `👤 <b>${username}</b> | <b>${tName}</b> | <b>Floor ${fNumber}</b>` +
-            COMMANDS_LIST
+            INFO_COMMANDS_MENU
           );
         }
       }
 
-      // 3. Ekstrak Unit (Pesan Telegram diawali /info & /unit)
+      // 3. Ekstrak Unit Rare (Format Telegram: 🚨 UNIT RARE DETECTED)
       if (/New Unit!/i.test(fullText) || /HIGH-VALUE DROP/i.test(fullText)) {
         const unitNameMatch = fullText.match(/Name\s*:\s*([^\r\n]+)/i);
         const rarityMatch = fullText.match(/Rarity\s*:\s*([^\r\n]+)/i);
@@ -156,17 +159,19 @@ module.exports = async (req, res) => {
           const rarity = rarityMatch ? cleanStr(rarityMatch[1]) : '';
           const unitDisplayName = rarity ? `${uName} [${rarity}]` : uName;
 
+          // Simpan ke Redis untuk tampilan UI Dashboard
           await redisCmd('rpush', `${prefix}:unitsReceived`, unitDisplayName);
 
+          // Kirim Alert Rapi ke Telegram
           await sendTelegramAlert(
-            `/info 🚨 <b>HIGH-VALUE DROP DETECTED</b>\n\n` +
+            `🚨 <b>UNIT RARE DETECTED</b>\n\n` +
             `👤 <b>${username}</b> | <b>${unitDisplayName}</b>` +
-            COMMANDS_LIST
+            INFO_COMMANDS_MENU
           );
         }
       }
 
-      // 4. Ekstrak Item & Drops Anime Dice Roblox
+      // 4. Ekstrak Items, Gems, Trait Reroll, & Buff Potions Anime Dice Roblox
       const dropMatches = [...fullText.matchAll(/([a-zA-Z0-9\s]+)\s*:\s*x([\d,.]+)/gi)];
 
       for (const match of dropMatches) {
