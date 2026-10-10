@@ -60,13 +60,13 @@ module.exports = async (req, res) => {
     }
   }
 
-  // API TETAPAN DAN PENGURUSAN
+  // API Tetapan Manual
   if (req.method === 'POST' && req.body && req.body.action) {
     if (cookies.auth !== 'true') {
       return res.status(401).json({ success: false, message: 'Unauthorized' });
     }
 
-    const { action, key, value, offlineMin } = req.body;
+    const { action, key, offlineMin } = req.body;
 
     if (action === 'reset') {
       await redisCmd('flushall');
@@ -164,7 +164,7 @@ module.exports = async (req, res) => {
     return res.status(200).send(loginHtml);
   }
 
-  // AMBIL DATA DASHBOARD & TENTUKAN URL WEBHOOK
+  // AMBIL DATA SYSTEM DAN DASHBOARD
   const systemStatus = (await redisCmd('get', 'system:analytics_status')).result;
   const isAnalyticsOn = systemStatus !== 'disabled';
 
@@ -239,14 +239,14 @@ module.exports = async (req, res) => {
   const protocol = req.headers['x-forwarded-proto'] || 'https';
   const webhookUrl = `${protocol}://${hostHeader}/api/webhook`;
 
-  // UTAMA DASHBOARD HTML
+  // TAMPILAN UTAMA DASHBOARD HTML
   const html = `
 <!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Dashboard Analytics & Manual Settings</title>
+  <title>Dashboard Analytics & Database Control</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
@@ -278,17 +278,17 @@ module.exports = async (req, res) => {
     .btn-danger { border-color: rgba(244, 63, 94, 0.3); color: var(--accent-red); }
     .btn-danger:hover { background: rgba(244, 63, 94, 0.15); border-color: var(--accent-red); color: var(--accent-red); }
 
-    /* WEBHOOK DISPLAY CARD DENGAN TOMBOL SALIN BARU */
+    /* WEBHOOK LINK CARD */
     .webhook-display-card { background: rgba(18, 26, 43, 0.9); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
     .wh-url-box { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(8, 12, 20, 0.8); border: 1px solid var(--card-border); padding: 0.5rem 1rem; border-radius: 10px; color: var(--accent-cyan); flex: 1; min-width: 280px; overflow-x: auto; white-space: nowrap; }
     .btn-copy { background: linear-gradient(135deg, var(--accent-cyan), #0284c7); color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 10px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem; }
     .btn-copy:hover { opacity: 0.9; }
 
-    /* MANUAL SETTINGS PANEL */
+    /* PANEL MANUAL SETTINGS */
     .settings-panel { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1.5rem; }
     .setting-item { display: flex; align-items: center; gap: 0.8rem; }
     .setting-label { font-size: 0.85rem; font-weight: 700; color: var(--text-muted); }
-    .setting-select, .setting-input { background: rgba(18, 26, 43, 0.8); border: 1px solid var(--card-border); color: #fff; padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; outline: none; }
+    .setting-select { background: rgba(18, 26, 43, 0.8); border: 1px solid var(--card-border); color: #fff; padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; outline: none; }
 
     .toggle-container { display: flex; align-items: center; gap: 0.6rem; background: rgba(18, 26, 43, 0.9); padding: 0.4rem 0.8rem; border-radius: 12px; border: 1px solid var(--card-border); }
     .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
@@ -364,7 +364,7 @@ module.exports = async (req, res) => {
       </div>
     </header>
 
-    <!-- KAD WEBHOOK URL LENGKAP DENGAN TOMBOL SALIN -->
+    <!-- WEBHOOK GATEWAY URL CARD -->
     <div class="webhook-display-card">
       <div style="font-weight: 700; font-size: 0.9rem; color: var(--text-muted);">WEBHOOK GATEWAY URL:</div>
       <div class="wh-url-box" id="whUrlValue">${webhookUrl}</div>
@@ -389,19 +389,19 @@ module.exports = async (req, res) => {
       <div class="setting-item">
         <span class="setting-label">OFFLINE ALERT THRESHOLD:</span>
         <select class="setting-select" id="offlineSelect" onchange="updateOfflineThreshold(this.value)">
-          <option value="10" ${offlineMinConfig === '10' ? 'selected' : ''}>10 Minit</option>
-          <option value="15" ${offlineMinConfig === '15' ? 'selected' : ''}>15 Minit</option>
-          <option value="20" ${offlineMinConfig === '20' ? 'selected' : ''}>20 Minit</option>
-          <option value="30" ${offlineMinConfig === '30' ? 'selected' : ''}>30 Minit</option>
+          <option value="10" ${offlineMinConfig === '10' ? 'selected' : ''}>10 Menit</option>
+          <option value="15" ${offlineMinConfig === '15' ? 'selected' : ''}>15 Menit</option>
+          <option value="20" ${offlineMinConfig === '20' ? 'selected' : ''}>20 Menit</option>
+          <option value="30" ${offlineMinConfig === '30' ? 'selected' : ''}>30 Menit</option>
         </select>
       </div>
 
       <div class="setting-item">
         <span class="setting-label">AUTO REFRESH RATE:</span>
         <select class="setting-select" id="refreshSelect" onchange="changeAutoRefresh(this.value)">
-          <option value="15000">15 Saat</option>
-          <option value="30000" selected>30 Saat</option>
-          <option value="60000">1 Minit</option>
+          <option value="15000">15 Detik</option>
+          <option value="30000" selected>30 Detik</option>
+          <option value="60000">1 Menit</option>
           <option value="0">OFF</option>
         </select>
       </div>
@@ -589,13 +589,16 @@ module.exports = async (req, res) => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled: isChecked })
         });
+        const data = await res.json();
         if (res.ok) {
-          alert(isChecked ? '🟢 Analisis system DIAKTIFKAN!' : '🔴 Analisis system DIMATIKAN!');
+          alert(isChecked ? '🟢 System Analytics DIAKTIFKAN! Webhook kembali menerima data.' : '🔴 System Analytics DIMATIKAN TOTAL! Webhook diblokir penuh tanpa penggunaan database Redis.');
         } else {
           el.checked = !isChecked;
+          alert('❌ Gagal mengubah status sistem.');
         }
       } catch (e) {
         el.checked = !isChecked;
+        alert('❌ Koneksi gagal.');
       }
     }
 
@@ -605,7 +608,7 @@ module.exports = async (req, res) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'setOfflineThreshold', offlineMin: minVal })
       });
-      alert('✅ Threshold Alert Offline diubah ke ' + minVal + ' minit.');
+      alert('✅ Threshold Alert Offline diubah ke ' + minVal + ' menit.');
     }
 
     async function deleteAccountData(username) {
