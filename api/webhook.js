@@ -104,7 +104,7 @@ async function scanAndAccumulate(user, text) {
   }
 
   const cleanText = text.replace(/\*\*/g, '');
-  const isUnitDrop = /Cash\/s|Plot Avg|Grade:|Tier:/i.test(cleanText) && /(?:Name|Unit):/i.test(cleanText);
+  const isUnitDrop = /Cash\/s|Plot Avg|Grade:|Tier:|New Unit!/i.test(cleanText) && /(?:Name|Unit):/i.test(cleanText);
 
   if (isUnitDrop) {
     const nameMatch = cleanText.match(/(?:Name|Unit):\s*([^\r\n]+)/i);
@@ -114,10 +114,17 @@ async function scanAndAccumulate(user, text) {
       if (rawUnitName && !['roblox script', 'stats', 'webhook'].includes(rawUnitName.toLowerCase())) {
         const rarityMatch = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
         const mutationMatch = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
+        
+        // Deteksi nilai rasio kelangkaan (seperti 1/1.6qi, 1/500qd, dll.)
+        const chanceMatch = cleanText.match(/1\/\d+(\.\d+)?[a-zA-Z]+/i);
+        const chanceText = chanceMatch ? ` [${chanceMatch[0]}]` : '';
 
         let unitInfo = rawUnitName;
         if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
         if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
+        
+        // Gabungkan rasio kelangkaan ke dalam string informasi unit
+        unitInfo += chanceText;
 
         await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
         await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
@@ -225,7 +232,6 @@ async function sendTelegramMessage(chatId, text) {
 }
 
 module.exports = async (req, res) => {
-  // Cek Status Analisis ON/OFF
   const systemStatus = await redisCmd('get', 'system:analytics_status');
   if (systemStatus === 'disabled') {
     return res.status(200).json({ status: 'offline', message: 'System Analytics is OFF' });
