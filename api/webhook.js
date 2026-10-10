@@ -62,7 +62,6 @@ async function scanAndAccumulate(user, text) {
   await redisCmd('expire', `${prefix}:totalLaporan`, TTL_30_MIN);
   await redisCmd('sadd', 'stats:users', user);
 
-  // Catat waktu laporan pertama jika belum ada
   const startTime = await redisCmd('get', `${prefix}:startTime`);
   if (!startTime) {
     await redisCmd('set', `${prefix}:startTime`, now);
@@ -189,9 +188,37 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true });
       }
 
-      if (userText === '/reset') {
-        await redisCmd('flushdb');
-        await sendTelegramMessage(chatId, `*Statistik Berhasil Dihapus!*\nSeluruh data akumulasi telah di-reset ke awal.`);
+      // 1. Peringatan /null
+      if (userText === '/null') {
+        await redisCmd('set', 'system:pending_reset', 'true');
+        await redisCmd('expire', 'system:pending_reset', 300); // Masa berlaku konfirmasi 5 menit
+
+        const alertText = `⚠️ *PERINGATAN KONFIRMASI RESET*\n\n` +
+          `Apakah Anda yakin ingin menghapus seluruh data statistik dan mengosongkan penyimpanan database?\n\n` +
+          `• Ketik /confirm untuk melanjutkan penghapusan.\n` +
+          `• Ketik /false untuk membatalkan.`;
+
+        await sendTelegramMessage(chatId, alertText);
+        return res.status(200).json({ success: true });
+      }
+
+      // 2. Eksekusi Penghapusan /confirm
+      if (userText === '/confirm') {
+        const isPending = await redisCmd('get', 'system:pending_reset');
+
+        if (isPending) {
+          await redisCmd('flushall');
+          await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
+        } else {
+          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /null terlebih dahulu untuk memulai permintaan reset.`);
+        }
+        return res.status(200).json({ success: true });
+      }
+
+      // 3. Pembatalan /false
+      if (userText === '/false') {
+        await redisCmd('del', 'system:pending_reset');
+        await sendTelegramMessage(chatId, `✅ *Dibatalkan*\nProses penghapusan database telah dibatalkan.`);
         return res.status(200).json({ success: true });
       }
 
@@ -216,7 +243,6 @@ module.exports = async (req, res) => {
           const unitsReceived = (await redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1)) || [];
           const potionsRaw = (await redisCmd('hgetall', `${prefix}:potions`)) || [];
 
-          // Hitung Durasi dan Rate
           const durationHours = Math.max((Date.now() - startTime) / (1000 * 60 * 60), 0.01);
           const gemsPerHour = Math.round(totalGems / durationHours);
           const traitPerHour = Math.round(totalTraitReroll / durationHours);
