@@ -183,20 +183,19 @@ module.exports = async (req, res) => {
       const chatId = payload.message.chat.id;
       const userText = (payload.message.text || '').trim();
 
+      // Perintah /start hanya menampilkan pesan selamat datang & perintah utama
       if (userText === '/start') {
         const welcomeText = `Selamat datang di Roblox Webhook Monitoring Bot!\n\n` +
           `Berikut adalah daftar perintah yang tersedia:\n` +
           `• /stats - Menampilkan akumulasi statistik dan estimasi rate per jam\n` +
-          `• /reset - Mengosongkan seluruh data penyimpanan database\n` +
-          `• /null - Mengosongkan seluruh data penyimpanan database\n` +
-          `• /confirm - Mengonfirmasi tindakan penghapusan database\n` +
-          `• /false - Membatalkan tindakan penghapusan database`;
+          `• /reset - Mengosongkan seluruh data penyimpanan database`;
 
         await sendTelegramMessage(chatId, welcomeText);
         return res.status(200).json({ success: true });
       }
 
-      if (userText === '/null' || userText === '/reset') {
+      // Perintah /reset meminta konfirmasi
+      if (userText === '/reset') {
         await redisCmd('set', 'system:pending_reset', 'true');
         await redisCmd('expire', 'system:pending_reset', 300);
 
@@ -209,6 +208,7 @@ module.exports = async (req, res) => {
         return res.status(200).json({ success: true });
       }
 
+      // Konfirmasi penghapusan
       if (userText === '/confirm') {
         const isPending = await redisCmd('get', 'system:pending_reset');
 
@@ -216,11 +216,12 @@ module.exports = async (req, res) => {
           await redisCmd('flushall');
           await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
         } else {
-          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset atau /null terlebih dahulu untuk memulai permintaan reset.`);
+          await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset terlebih dahulu untuk memulai permintaan reset.`);
         }
         return res.status(200).json({ success: true });
       }
 
+      // Pembatalan penghapusan
       if (userText === '/false') {
         await redisCmd('del', 'system:pending_reset');
         await sendTelegramMessage(chatId, `✅ *Dibatalkan*\nProses penghapusan database telah dibatalkan.`);
