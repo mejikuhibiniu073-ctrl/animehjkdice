@@ -61,22 +61,42 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, redirect: '/api/login' });
     }
 
+    // FIX: RESET DATABASE STATISTIK AKUN SECARA TOTAL & TRACKER STORAGE REDIS
     if (req.method === 'POST' && body.action === 'reset') {
       const usersRes = await redisCmd('smembers', 'stats:users');
       const users = usersRes.result || [];
-      if (Array.isArray(users)) {
+
+      if (Array.isArray(users) && users.length > 0) {
         for (const u of users) {
           const keys = [
-            `stats:${u}:totalLaporan`, `stats:${u}:unitMasukTas`, `stats:${u}:towerSelesai`,
-            `stats:${u}:totalGems`, `stats:${u}:totalTraitReroll`, `stats:${u}:startTime`,
-            `stats:${u}:lastSeen`, `stats:${u}:unitsReceived`, `stats:${u}:towerList`, `stats:${u}:potions`
+            `stats:${u}:totalLaporan`,
+            `stats:${u}:unitMasukTas`,
+            `stats:${u}:towerSelesai`,
+            `stats:${u}:totalGems`,
+            `stats:${u}:totalTraitReroll`,
+            `stats:${u}:startTime`,
+            `stats:${u}:lastSeen`,
+            `stats:${u}:unitsReceived`,
+            `stats:${u}:towerList`,
+            `stats:${u}:potions`
           ];
-          for (const k of keys) await redisCmd('del', k);
+
+          for (const k of keys) {
+            await redisCmd('del', k);
+          }
         }
       }
+
+      // Hapus indeks daftar akun statistik
       await redisCmd('del', 'stats:users');
+
+      // Reset tracker byte storage ke 0
       await redisCmd('set', 'global:total_bytes', '0');
-      return res.status(200).json({ success: true });
+
+      return res.status(200).json({ 
+        success: true, 
+        message: 'Seluruh statistik akun dan storage tracker berhasil dibersihkan!' 
+      });
     }
 
     if (req.method === 'POST' && body.action === 'deleteKey' && body.key) {
@@ -397,4 +417,3 @@ module.exports = async (req, res) => {
     return res.status(500).send('Internal Server Error: ' + err.message);
   }
 };
-          
