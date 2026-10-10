@@ -1,20 +1,23 @@
 const CONFIG = {
   REDIS_URL: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
   REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
-  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,
-  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID
+  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || '8867286519:AAFCsH9InhDdTAolaDDn-dU4-zvAOPdLGSQ',
+  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || '1315912406'
 };
 
 async function redisCmd(command, ...args) {
-  if (!CONFIG.REDIS_URL || !CONFIG.REDIS_TOKEN) return null;
+  if (!CONFIG.REDIS_URL || !CONFIG.REDIS_TOKEN) return { result: null, latencyMs: 0 };
+  const start = Date.now();
   try {
     const formattedArgs = args.map(arg => encodeURIComponent(String(arg))).join('/');
     const res = await fetch(`${CONFIG.REDIS_URL}/${command}/${formattedArgs}`, {
       headers: { Authorization: `Bearer ${CONFIG.REDIS_TOKEN}` }
     });
-    return (await res.json()).result;
+    const latencyMs = Date.now() - start;
+    const data = await res.json();
+    return { result: data.result, latencyMs };
   } catch (e) {
-    return null;
+    return { result: null, latencyMs: Date.now() - start };
   }
 }
 
@@ -38,9 +41,7 @@ async function sendTelegramAlert(message, customChatId = null) {
 
 function cleanStr(str) {
   if (!str) return '';
-  return String(str)
-    .replace(/[\*_~`#\|]/g, '')
-    .trim();
+  return String(str).replace(/[\*_~`#\|]/g, '').trim();
 }
 
 function getFormattedTime() {
@@ -59,17 +60,11 @@ function getFormattedTime() {
   return formatter.format(now).replace(/\./g, ':') + ' WIB';
 }
 
-const COMMANDS_MENU_TEXT = 
-  `\n\nCOMMANDS AVAILABLE:\n` +
-  `- /p : Menampilkan menu daftar perintah ini\n` +
-  `- /info : Menampilkan status sistem real-time\n` +
-  `- /stats : Melihat ringkasan statistik akun\n` +
-  `- /tower : Histori penyelesaian tower\n` +
-  `- /unit : Histori unit rare`;
-
 module.exports = async (req, res) => {
+  const requestStartTime = Date.now();
+
   if (req.method === 'GET') {
-    const statusRes = await redisCmd('get', 'system:analytics_status');
+    const { result: statusRes } = await redisCmd('get', 'system:analytics_status');
     return res.status(200).json({
       success: true,
       service: 'Webhook Gateway Active',
@@ -88,32 +83,30 @@ module.exports = async (req, res) => {
 
       const signalTime = getFormattedTime();
 
-      // -------------------------------------------------------------
-      // 1. PENANGANAN PESAN LANGSUNG DARI TELEGRAM BOT (Bila diketik /p atau /info di Telegram)
-      // -------------------------------------------------------------
+      // 1. RESPON UNTUK PERINTAH TELEGRAM BOT /p (DIKETIK LANGSUNG DI TELEGRAM)
       if (body.message && body.message.chat) {
         const teleChatId = body.message.chat.id;
         const teleText = body.message.text || '';
 
-        if (/^\/p\b/i.test(teleText) || /^\/info\b/i.test(teleText) || /^\/start\b/i.test(teleText)) {
-          const sysStatus = await redisCmd('get', 'system:analytics_status');
+        if (/^\/p\b/i.test(teleText) || /^\/start\b/i.test(teleText)) {
+          const { result: sysStatus, latencyMs: dbPing } = await redisCmd('get', 'system:analytics_status');
           const isOnline = sysStatus !== 'disabled';
+          const totalWebhookLatency = Date.now() - requestStartTime;
 
           await sendTelegramAlert(
             `BOT MONITORING ACTIVE\n\n` +
             `Status System: ${isOnline ? 'ONLINE' : 'OFFLINE'}\n` +
-            `Waktu Sinyal: ${signalTime}` +
-            COMMANDS_MENU_TEXT,
+            `DB Ping: ${dbPing} ms\n` +
+            `Webhook Latency: ${totalWebhookLatency} ms\n` +
+            `Waktu Sinyal: ${signalTime}`,
             teleChatId
           );
-          return res.status(200).json({ success: true, message: 'Telegram command handled' });
+          return res.status(200).json({ success: true, message: 'Command /p handled' });
         }
       }
 
-      // -------------------------------------------------------------
-      // 2. PENANGANAN WEBHOOK DARI GAME / DISCORD
-      // -------------------------------------------------------------
-      const statusRes = await redisCmd('get', 'system:analytics_status');
+      // 2. PEMPROSESAN WEBHOOK MASUK DARI DISCORD / GAME
+      const { result: statusRes } = await redisCmd('get', 'system:analytics_status');
       if (statusRes === 'disabled') {
         return res.status(200).json({ success: true, message: 'Analytics System IS OFF' });
       }
@@ -132,8 +125,7 @@ module.exports = async (req, res) => {
           if (e.title) textChunks.push(e.title);
           if (e.description) textChunks.push(e.description);
           if (e.author && e.author.name) textChunks.push(e.author.name);
-          if (e.footer && e.footer.text) textChunks.push(e.footer.text);
-          if (Array.isArray(e.fields)) {
+          if (e.fields && Array.isArray(e.fields)) {
             e.fields.forEach(f => {
               if (f.name) textChunks.push(f.name);
               if (f.value) textChunks.push(f.value);
@@ -142,19 +134,20 @@ module.exports = async (req, res) => {
         });
       }
 
-      const rawText = textChunks.join('\n');
-      const isCmdP = /\/p\b/i.test(rawText);
+      const fullRawText = textChunks.join('\n');
 
-      // Ekstrak Username
-      let username = 'Player';
-      const userMatch = rawText.match(/Username\s*:\s*([^\r\n]+)/i);
+      // PRESISI USERNAME (MEMISAHKAN DARI NAMA TOWER)
+      let username = '';
+      const userMatch = fullRawText.match(/Username\s*:\s*([^\r\n]+)/i);
       if (userMatch) {
         username = cleanStr(userMatch[1]);
       } else if (body.username && body.username !== 'Webhook') {
         username = cleanStr(body.username);
+      } else if (body.embeds && body.embeds[0] && body.embeds[0].author && body.embeds[0].author.name) {
+        username = cleanStr(body.embeds[0].author.name);
       }
 
-      if (!username || username === 'Webhook') username = 'Player';
+      if (!username) username = 'Player';
 
       const prefix = `stats:${username}`;
       const now = Date.now();
@@ -162,20 +155,20 @@ module.exports = async (req, res) => {
       await redisCmd('sadd', 'stats:users', username);
       await redisCmd('set', `${prefix}:lastSeen`, now);
 
-      const existStart = await redisCmd('get', `${prefix}:startTime`);
+      const { result: existStart } = await redisCmd('get', `${prefix}:startTime`);
       if (!existStart) {
         await redisCmd('set', `${prefix}:startTime`, now);
-        const globalStart = await redisCmd('get', 'global:system_start_time');
+        const { result: globalStart } = await redisCmd('get', 'global:system_start_time');
         if (!globalStart) await redisCmd('set', 'global:system_start_time', now);
       }
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      const isTowerReport = /Floor Reached\s*:\s*\d+/i.test(rawText) || /Tower/i.test(rawText);
-      const isUnitReport = /Rarity\s*:/i.test(rawText) || /Cash\/s/i.test(rawText) || /Mutation\s*:/i.test(rawText);
+      const isTowerReport = /Tower Completed!/i.test(fullRawText) || /Floor Reached\s*:/i.test(fullRawText);
+      const isUnitReport = /Rarity\s*:/i.test(fullRawText) || /Mutation\s*:/i.test(fullRawText) || /New Unit!/i.test(fullRawText);
 
-      // Ekstrak Drops & Items
-      const dropMatches = [...rawText.matchAll(/([a-zA-Z0-9'\s]+)\s*:\s*x([\d,.]+)/gi)];
+      // EKSTRAKSI DROPS & ITEMS (SUPPORT JINWOO'S DAGGERS & BUFFS)
+      const dropMatches = [...fullRawText.matchAll(/([a-zA-Z0-9'\s]+)\s*:\s*x([\d,.]+)/gi)];
       let dropsListText = [];
 
       for (const match of dropMatches) {
@@ -196,42 +189,43 @@ module.exports = async (req, res) => {
         }
       }
 
-      // Laporan TOWER
+      // LAPORAN TOWER COMPLETED
       if (isTowerReport) {
-        const nameMatch = rawText.match(/Name\s*:\s*([^\r\n]+)/i);
-        const floorMatch = rawText.match(/Floor Reached\s*:\s*([\d]+)/i);
+        const nameMatch = fullRawText.match(/Name\s*:\s*([^\r\n]+)/i);
+        const floorMatch = fullRawText.match(/Floor Reached\s*:\s*([\d]+)/i);
 
-        if (nameMatch) {
-          const tName = cleanStr(nameMatch[1]);
-          const fNumber = floorMatch ? floorMatch[1] : '1';
-          const towerDisplayName = `${tName} (Floor ${fNumber})`;
+        let realTowerName = nameMatch ? cleanStr(nameMatch[1]) : 'Shadow Tower';
+        let realFloor = floorMatch ? floorMatch[1] : '1';
 
-          await redisCmd('rpush', `${prefix}:towerList`, towerDisplayName);
-          await redisCmd('incr', `${prefix}:towerSelesai`);
-
-          const dropsFormatted = dropsListText.length > 0 
-            ? `\n\nDrops Obtained:\n` + dropsListText.join('\n')
-            : '';
-
-          const commandsFooter = isCmdP ? COMMANDS_MENU_TEXT : '';
-
-          await sendTelegramAlert(
-            `🏆 <b>TOWER COMPLETED</b>\n\n` +
-            `Akun: ${username}\n` +
-            `Waktu: ${signalTime}\n` +
-            `Tower: ${tName}\n` +
-            `Floor: ${fNumber}` +
-            dropsFormatted +
-            commandsFooter
-          );
+        // Koreksi otomatis jika nama tower keliru terbaca sebagai username
+        if (realTowerName.toLowerCase() === username.toLowerCase()) {
+          realTowerName = 'Shadow Tower';
         }
+
+        const towerDisplayName = `${realTowerName} (Floor${realFloor})`;
+
+        await redisCmd('rpush', `${prefix}:towerList`, towerDisplayName);
+        await redisCmd('incr', `${prefix}:towerSelesai`);
+
+        const dropsFormatted = dropsListText.length > 0 
+          ? `\n\nDrops Obtained:\n` + dropsListText.join('\n')
+          : '';
+
+        await sendTelegramAlert(
+          `🏆 <b>TOWER COMPLETED</b>\n\n` +
+          `Akun: ${username}\n` +
+          `Waktu: ${signalTime}\n` +
+          `Tower: ${realTowerName}\n` +
+          `Floor: ${realFloor}` +
+          dropsFormatted
+        );
       }
 
-      // Laporan UNIT
+      // LAPORAN UNIT RARE DETECTED
       if (isUnitReport) {
-        const nameMatch = rawText.match(/Name\s*:\s*([^\r\n]+)/i);
-        const rarityMatch = rawText.match(/Rarity\s*:\s*([^\r\n]+)/i);
-        const mutationMatch = rawText.match(/Mutation\s*:\s*([^\r\n]+)/i);
+        const nameMatch = fullRawText.match(/Name\s*:\s*([^\r\n]+)/i);
+        const rarityMatch = fullRawText.match(/Rarity\s*:\s*([^\r\n]+)/i);
+        const mutationMatch = fullRawText.match(/Mutation\s*:\s*([^\r\n]+)/i);
 
         if (nameMatch) {
           const uName = cleanStr(nameMatch[1]);
@@ -246,14 +240,11 @@ module.exports = async (req, res) => {
 
           await redisCmd('rpush', `${prefix}:unitsReceived`, unitDisplayName);
 
-          const commandsFooter = isCmdP ? COMMANDS_MENU_TEXT : '';
-
           await sendTelegramAlert(
             `🚨 <b>UNIT RARE DETECTED</b>\n\n` +
             `Akun: ${username}\n` +
             `Waktu: ${signalTime}\n` +
-            `Unit: ${unitDisplayName}` +
-            commandsFooter
+            `Unit: ${unitDisplayName}`
           );
         }
       }
