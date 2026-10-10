@@ -13,29 +13,16 @@ const OFFLINE_THRESHOLD_MS = 20 * 60 * 1000;
 
 function getCurrentTimeWIB() {
   return new Date().toLocaleString('id-ID', {
-    timeZone: 'Asia/Jakarta',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric'
+    timeZone: 'Asia/Jakarta', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    day: '2-digit', month: 'short', year: 'numeric'
   });
 }
 
-function extractCleanUsername(rawName, fullText) {
-  if (!fullText) fullText = '';
-  const cleanText = fullText.replace(/\*\*/g, '');
-
-  const bodyUserMatch = cleanText.match(/Username:\s*\|\|([^|]+)\|\|/i);
-  if (bodyUserMatch) return bodyUserMatch[1].trim();
-
-  const plainUserMatch = cleanText.match(/Username:\s*([^\r\n]+)/i);
-  if (plainUserMatch) return plainUserMatch[1].replace(/\|\|/g, '').trim();
-
-  if (rawName) return rawName.replace(/\|\|/g, '').replace(/\*\*/g, '').trim();
-
-  return 'Roblox Script';
+function extractCleanUsername(rawName, fullText = '') {
+  const clean = fullText.replace(/\*\*/g, '');
+  const match = clean.match(/Username:\s*\|\|([^|]+)\|\|/i) || clean.match(/Username:\s*([^\r\n]+)/i);
+  if (match) return match[1].replace(/\|\|/g, '').trim();
+  return rawName ? rawName.replace(/\|\||\*\*/g, '').trim() : 'Roblox Script';
 }
 
 async function redisCmd(command, ...args) {
@@ -45,259 +32,178 @@ async function redisCmd(command, ...args) {
     const res = await fetch(`${CONFIG.REDIS_URL}/${command}/${formattedArgs}`, {
       headers: { Authorization: `Bearer ${CONFIG.REDIS_TOKEN}` }
     });
-    const data = await res.json();
-    return data.result;
+    return (await res.json()).result;
   } catch (e) {
-    console.error('[Redis Error]:', e);
     return null;
   }
 }
 
 async function checkOfflineAccounts(currentActiveUser) {
-  let users = await redisCmd('smembers', 'stats:users');
-  if (!Array.isArray(users)) users = users ? [users] : [];
-
+  let users = await redisCmd('smembers', 'stats:users') || [];
+  if (!Array.isArray(users)) users = [users];
   const now = Date.now();
 
-  for (const user of users) {
-    if (user === currentActiveUser) continue;
-
+  await Promise.all(users.map(async (user) => {
+    if (user === currentActiveUser) return;
     const prefix = `stats:${user}`;
-    const lastSeen = await redisCmd('get', `${prefix}:lastSeen`);
-    const isAlerted = await redisCmd('get', `${prefix}:offlineAlerted`);
+    const [lastSeen, isAlerted] = await Promise.all([
+      redisCmd('get', `${prefix}:lastSeen`),
+      redisCmd('get', `${prefix}:offlineAlerted`)
+    ]);
 
-    if (lastSeen) {
-      const timeDiff = now - parseInt(lastSeen, 10);
-      if (timeDiff > OFFLINE_THRESHOLD_MS && !isAlerted) {
-        const offlineMinutes = Math.floor(timeDiff / (1000 * 60));
-        const alertMsg = `🚨 *[ALERT AKUN OFFLINE]*\n\n` +
-          `👤 Akun: *${user}*\n` +
-          `⚠️ Status: Tidak ada laporan masuk selama *${offlineMinutes} menit*!\n` +
-          `Mohon periksa emulator atau koneksi device Anda.`;
-
-        await sendTelegramMessage(CONFIG.CHAT_ID, alertMsg);
-        await redisCmd('set', `${prefix}:offlineAlerted`, 'true');
-        await redisCmd('expire', `${prefix}:offlineAlerted`, 3600);
-      }
+    if (lastSeen && (now - parseInt(lastSeen, 10)) > OFFLINE_THRESHOLD_MS && !isAlerted) {
+      const min = Math.floor((now - parseInt(lastSeen, 10)) / 60000);
+      const msg = `🚨 *[ALERT AKUN OFFLINE]*\n\n👤 Akun: *${user}*\n⚠️ Status: Tidak ada laporan masuk selama *${min} menit*!`;
+      await sendTelegramMessage(CONFIG.CHAT_ID, msg);
+      await redisCmd('set', `${prefix}:offlineAlerted`, 'true');
+      await redisCmd('expire', `${prefix}:offlineAlerted`, 3600);
     }
-  }
+  }));
 }
 
-async function scanAndAccumulate(user, text) {
+async function scanAndAccumulate(user, text, rawLen) {
   if (!text) return;
-
   const prefix = `stats:${user}`;
   const now = Date.now();
 
-  await redisCmd('set', `${prefix}:lastSeen`, now);
-  await redisCmd('expire', `${prefix}:lastSeen`, TTL_5_HOURS);
-  await redisCmd('del', `${prefix}:offlineAlerted`);
+  // Inisialisasi Uptime & Metrik Global (Dipertahankan saat reset)
+  const globalUptime = await redisCmd('get', 'global:system_start_time');
+  if (!globalUptime) await redisCmd('set', 'global:system_start_time', now);
 
-  await redisCmd('incrby', `${prefix}:totalLaporan`, 1);
-  await redisCmd('expire', `${prefix}:totalLaporan`, TTL_5_HOURS);
-  await redisCmd('sadd', 'stats:users', user);
+  await Promise.all([
+    redisCmd('set', `${prefix}:lastSeen`, now),
+    redisCmd('expire', `${prefix}:lastSeen`, TTL_5_HOURS),
+    redisCmd('del', `${prefix}:offlineAlerted`),
+    redisCmd('incrby', `${prefix}:totalLaporan`, 1),
+    redisCmd('expire', `${prefix}:totalLaporan`, TTL_5_HOURS),
+    redisCmd('sadd', 'stats:users', user),
+    redisCmd('incrby', 'global:total_commands', 1),
+    redisCmd('incrby', 'global:total_bytes', (rawLen || text.length) + 120)
+  ]);
 
   const startTime = await redisCmd('get', `${prefix}:startTime`);
-  if (!startTime) {
-    await redisCmd('set', `${prefix}:startTime`, now);
-    await redisCmd('expire', `${prefix}:startTime`, TTL_5_HOURS);
-  } else {
-    await redisCmd('expire', `${prefix}:startTime`, TTL_5_HOURS);
-  }
+  if (!startTime) await redisCmd('set', `${prefix}:startTime`, now);
+  await redisCmd('expire', `${prefix}:startTime`, TTL_5_HOURS);
 
   const cleanText = text.replace(/\*\*/g, '');
-  const isUnitDrop = /Cash\/s|Plot Avg|Grade:|Tier:|New Unit!/i.test(cleanText) && /(?:Name|Unit):/i.test(cleanText);
 
-  if (isUnitDrop) {
+  // 1. Scan Unit Drop
+  if (/Cash\/s|Plot Avg|Grade:|Tier:|New Unit!/i.test(cleanText) && /(?:Name|Unit):/i.test(cleanText)) {
     const nameMatch = cleanText.match(/(?:Name|Unit):\s*([^\r\n]+)/i);
     if (nameMatch) {
-      const rawUnitName = nameMatch[1].replace(/\|\|/g, '').trim();
+      const rawUnit = nameMatch[1].replace(/\|\|/g, '').trim();
+      if (rawUnit && !['roblox script', 'stats', 'webhook'].includes(rawUnit.toLowerCase())) {
+        const rarity = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
+        const mutation = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
+        const chance = cleanText.match(/1\/\d+(\.\d+)?[a-zA-Z]+/i);
 
-      if (rawUnitName && !['roblox script', 'stats', 'webhook'].includes(rawUnitName.toLowerCase())) {
-        const rarityMatch = cleanText.match(/Rarity:\s*([^\r\n]+)/i);
-        const mutationMatch = cleanText.match(/Mutation:\s*([^\r\n]+)/i);
-        
-        // Deteksi rasio kelangkaan (contoh: 1/1.6qi, 1/500qd)
-        const chanceMatch = cleanText.match(/1\/\d+(\.\d+)?[a-zA-Z]+/i);
-        const chanceText = chanceMatch ? ` [${chanceMatch[0]}]` : '';
+        let unitInfo = rawUnit;
+        if (rarity) unitInfo += ` [${rarity[1].replace(/\|\|/g, '').trim()}]`;
+        if (mutation) unitInfo += ` (${mutation[1].replace(/\|\|/g, '').trim()})`;
+        if (chance) unitInfo += ` [${chance[0]}]`;
 
-        let unitInfo = rawUnitName;
-        if (rarityMatch) unitInfo += ` [${rarityMatch[1].replace(/\|\|/g, '').trim()}]`;
-        if (mutationMatch) unitInfo += ` (${mutationMatch[1].replace(/\|\|/g, '').trim()})`;
-        
-        unitInfo += chanceText;
-
-        await redisCmd('incrby', `${prefix}:unitMasukTas`, 1);
-        await redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS);
-
-        await redisCmd('rpush', `${prefix}:unitsReceived`, unitInfo);
-        await redisCmd('expire', `${prefix}:unitsReceived`, TTL_5_HOURS);
-      }
-    }
-  } else {
-    if (/tower completed|floor reached/i.test(cleanText)) {
-      await redisCmd('incrby', `${prefix}:towerSelesai`, 1);
-      await redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS);
-    }
-  }
-
-  const gemsMatch = cleanText.match(/Gems:\s*x?([\d,]+)/i);
-  if (gemsMatch) {
-    const gemsVal = parseInt(gemsMatch[1].replace(/,/g, ''), 10);
-    if (!isNaN(gemsVal)) {
-      await redisCmd('incrby', `${prefix}:totalGems`, gemsVal);
-      await redisCmd('expire', `${prefix}:totalGems`, TTL_5_HOURS);
-    }
-  }
-
-  const traitMatch = cleanText.match(/Trait Reroll:\s*x?([\d,]+)/i);
-  if (traitMatch) {
-    const traitVal = parseInt(traitMatch[1].replace(/,/g, ''), 10);
-    if (!isNaN(traitVal)) {
-      await redisCmd('incrby', `${prefix}:totalTraitReroll`, traitVal);
-      await redisCmd('expire', `${prefix}:totalTraitReroll`, TTL_5_HOURS);
-    }
-  }
-
-  const lines = cleanText.split('\n');
-  for (const line of lines) {
-    const itemMatch = line.match(/([A-Za-z0-9'\s]+):\s*x([\d,]+)/);
-    if (itemMatch) {
-      const itemName = itemMatch[1].trim();
-      const qty = parseInt(itemMatch[2].replace(/,/g, ''), 10);
-      const ignoredKeys = ['Gems', 'Trait Reroll', 'Level', 'Floor Reached', 'Name', 'Rarity', 'Tier', 'Grade', 'Cash/s'];
-      if (!ignoredKeys.includes(itemName) && !isNaN(qty)) {
-        await redisCmd('hincrby', `${prefix}:potions`, itemName, qty);
-        await redisCmd('expire', `${prefix}:potions`, TTL_5_HOURS);
+        await Promise.all([
+          redisCmd('incrby', `${prefix}:unitMasukTas`, 1),
+          redisCmd('expire', `${prefix}:unitMasukTas`, TTL_5_HOURS),
+          redisCmd('rpush', `${prefix}:unitsReceived`, unitInfo),
+          redisCmd('expire', `${prefix}:unitsReceived`, TTL_5_HOURS)
+        ]);
       }
     }
   }
+
+  // 2. Scan Tower / Floor
+  const towerName = cleanText.match(/(?:Tower|Floor|Mode|Dungeon|Map):\s*([^\r\n]+)/i);
+  const floor = cleanText.match(/(?:Floor|Lantai|Stage|Reached):\s*([\d]+)/i) || cleanText.match(/(?:Completed|Finished)\s*(?:Floor|Lantai)?\s*([\d]+)?/i);
+  if (towerName || floor || /tower completed|floor reached/i.test(cleanText)) {
+    const tName = towerName ? towerName[1].replace(/\|\|/g, '').trim() : 'Tower Mode';
+    const fVal = floor && floor[1] ? floor[1].trim() : 'Selesai';
+    const towerEntry = `${tName} (Lantai: ${fVal})`;
+
+    await Promise.all([
+      redisCmd('incrby', `${prefix}:towerSelesai`, 1),
+      redisCmd('expire', `${prefix}:towerSelesai`, TTL_5_HOURS),
+      redisCmd('rpush', `${prefix}:towerList`, towerEntry),
+      redisCmd('expire', `${prefix}:towerList`, TTL_5_HOURS)
+    ]);
+  }
+
+  // 3. Scan Gems & Trait
+  const gems = cleanText.match(/Gems:\s*x?([\d,]+)/i);
+  if (gems) {
+    const val = parseInt(gems[1].replace(/,/g, ''), 10);
+    if (!isNaN(val)) await redisCmd('incrby', `${prefix}:totalGems`, val);
+  }
+
+  const trait = cleanText.match(/Trait Reroll:\s*x?([\d,]+)/i);
+  if (trait) {
+    const val = parseInt(trait[1].replace(/,/g, ''), 10);
+    if (!isNaN(val)) await redisCmd('incrby', `${prefix}:totalTraitReroll`, val);
+  }
+
+  // 4. Scan Items & Potions
+  const ignored = ['Gems', 'Trait Reroll', 'Level', 'Floor Reached', 'Name', 'Rarity', 'Tier', 'Grade', 'Cash/s'];
+  cleanText.split('\n').forEach(async (line) => {
+    const m = line.match(/([A-Za-z0-9'\s]+):\s*x([\d,]+)/);
+    if (m && !ignored.includes(m[1].trim())) {
+      const qty = parseInt(m[2].replace(/,/g, ''), 10);
+      if (!isNaN(qty)) await redisCmd('hincrby', `${prefix}:potions`, m[1].trim(), qty);
+    }
+  });
 
   await checkOfflineAccounts(user);
 }
 
-function checkRareAlert(text) {
-  if (!text) return false;
+function checkRareAlert(text = '') {
   const lower = text.toLowerCase();
-
-  const hasHigherUnitPrefix = /1\/\d+(\.\d+)?(qi|sx|sp|oc|no|dc)/i.test(lower);
-  if (hasHigherUnitPrefix) return true;
-
-  const qdMatch = lower.match(/1\/(\d+(\.\d+)?)qd/i);
-  if (qdMatch) {
-    const qdVal = parseFloat(qdMatch[1]);
-    if (!isNaN(qdVal) && qdVal >= 500) return true;
-  }
-
-  return false;
-}
-
-function parseDiscordEmbed(embed) {
-  const parts = [];
-  if (embed.title) parts.push(`*${embed.title}*`);
-  if (embed.description) parts.push(embed.description);
-
-  if (Array.isArray(embed.fields) && embed.fields.length > 0) {
-    const fieldsText = embed.fields
-      .map(field => `*${field.name}:*\n${field.value}`)
-      .join('\n\n');
-    parts.push(fieldsText);
-  }
-  return parts.join('\n\n');
+  if (/1\/\d+(\.\d+)?(qi|sx|sp|oc|no|dc)/i.test(lower)) return true;
+  const qd = lower.match(/1\/(\d+(\.\d+)?)qd/i);
+  return qd && parseFloat(qd[1]) >= 500;
 }
 
 async function sendTelegramMessage(chatId, text) {
   const url = `${CONFIG.TELEGRAM_BASE_URL}${CONFIG.BOT_TOKEN}/sendMessage`;
+  const body = JSON.stringify({ chat_id: chatId, text, parse_mode: 'Markdown', disable_web_page_preview: true });
   try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        parse_mode: 'Markdown',
-        disable_web_page_preview: true
-      })
-    });
-  } catch (err) {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        disable_web_page_preview: true
-      })
-    });
-  }
+    await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+  } catch (e) {}
 }
 
 module.exports = async (req, res) => {
-  // 1. CEK STATUS DARI MEMORI LOKAL (0% Redis Usage saat status OFF)
   if (!system.getStatus()) {
-    return res.status(200).json({ 
-      status: 'offline', 
-      message: 'System Analytics is TOTALLY OFF (Zero DB usage)' 
-    });
+    return res.status(200).json({ status: 'offline', message: 'System Analytics is TOTALLY OFF (Zero DB usage)' });
   }
-
-  if (req.method !== 'POST') {
-    return res.status(200).json({ status: 'online', message: 'Webhook Gateway Active' });
-  }
+  if (req.method !== 'POST') return res.status(200).json({ status: 'online', message: 'Webhook Gateway Active' });
 
   try {
     let payload = req.body;
-
+    const rawLen = JSON.stringify(payload).length;
     if (typeof payload === 'string') {
-      try {
-        payload = JSON.parse(payload);
-      } catch {
-        payload = { content: payload };
-      }
+      try { payload = JSON.parse(payload); } catch { payload = { content: payload }; }
     }
 
-    let fullTextToScan = '';
-    let messageBody = '';
-
+    let fullText = '', messageBody = '';
     if (Array.isArray(payload?.embeds) && payload.embeds.length > 0) {
       const embed = payload.embeds[0];
-      messageBody = parseDiscordEmbed(embed);
-
-      fullTextToScan += `${embed.title || ''}\n${embed.description || ''}\n`;
-      if (Array.isArray(embed.fields)) {
-        embed.fields.forEach(f => {
-          fullTextToScan += `${f.name}: ${f.value}\n`;
-        });
-      }
+      messageBody = [embed.title && `*${embed.title}*`, embed.description, embed.fields?.map(f => `*${f.name}:*\n${f.value}`).join('\n\n')].filter(Boolean).join('\n\n');
+      fullText = `${embed.title || ''}\n${embed.description || ''}\n` + (embed.fields?.map(f => `${f.name}: ${f.value}`).join('\n') || '');
     } else {
       messageBody = payload?.content || payload?.message || JSON.stringify(payload);
-      fullTextToScan = messageBody;
+      fullText = messageBody;
     }
 
-    const cleanUsername = extractCleanUsername(payload?.username, fullTextToScan);
+    const cleanUser = extractCleanUsername(payload?.username, fullText);
     const timeWIB = getCurrentTimeWIB();
-    const eventType = payload?.event_type || 'normal';
+    const isRare = checkRareAlert(fullText);
 
-    await scanAndAccumulate(cleanUsername, fullTextToScan);
+    await scanAndAccumulate(cleanUser, fullText, rawLen);
 
-    let formattedMessage = '';
-    const isRare = checkRareAlert(fullTextToScan);
-    const alertPrefix = isRare ? `🚨 *[HIGH-VALUE DROP DETECTED]* 🚨\n` : '';
+    let formattedMsg = isRare ? `🚨 *[HIGH-VALUE DROP DETECTED]* 🚨\n` : '';
+    formattedMsg += `Username: *${cleanUser}*\nWaktu: ${timeWIB}\n────────────────\n${messageBody}`;
 
-    if (eventType === 'error') {
-      formattedMessage = `*[ERROR LOG]*\nUsername: *${cleanUsername}*\nWaktu: ${timeWIB}\n────────────────\n${payload?.error_message || 'Error pada script.'}`;
-    } else if (eventType === 'disconnect') {
-      formattedMessage = `*[DISCONNECT ALERT]*\nUsername: *${cleanUsername}*\nWaktu: ${timeWIB}\n────────────────\nScript terputus dari server!`;
-    } else {
-      formattedMessage = `${alertPrefix}Username: *${cleanUsername}*\nWaktu: ${timeWIB}\n────────────────\n${messageBody}`;
-    }
-
-    await sendTelegramMessage(CONFIG.CHAT_ID, formattedMessage);
-
+    await sendTelegramMessage(CONFIG.CHAT_ID, formattedMsg);
     return res.status(200).json({ success: true, status: 'scanned_and_saved' });
-
   } catch (error) {
-    console.error('[Webhook Processing Error]:', error.message);
     return res.status(500).json({ success: false, error: 'Internal server error' });
   }
 };
