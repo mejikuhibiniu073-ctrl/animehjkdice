@@ -6,7 +6,8 @@ const CONFIG = {
 async function redisCmd(command, ...args) {
   if (!CONFIG.REDIS_URL || !CONFIG.REDIS_TOKEN) return null;
   try {
-    const res = await fetch(`${CONFIG.REDIS_URL}/${command}/${args.map(encodeURIComponent).join('/')}`, {
+    const formattedArgs = args.map(arg => encodeURIComponent(String(arg))).join('/');
+    const res = await fetch(`${CONFIG.REDIS_URL}/${command}/${formattedArgs}`, {
       headers: { Authorization: `Bearer ${CONFIG.REDIS_TOKEN}` }
     });
     const data = await res.json();
@@ -17,9 +18,12 @@ async function redisCmd(command, ...args) {
 }
 
 module.exports = async (req, res) => {
-  const users = (await redisCmd('smembers', 'stats:users')) || [];
-  const accountsData = [];
+  let users = await redisCmd('smembers', 'stats:users');
+  if (!Array.isArray(users)) {
+    users = users ? [users] : [];
+  }
 
+  const accountsData = [];
   let grandTotalGems = 0;
   let grandTotalTrait = 0;
   let totalLaporanSemua = 0;
@@ -76,7 +80,6 @@ module.exports = async (req, res) => {
     body { background-color: var(--bg-dark); color: var(--text-main); min-height: 100vh; padding: 2rem 1.5rem; }
     .container { max-width: 1300px; margin: 0 auto; }
 
-    /* Top Navigation Header */
     .nav-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
     .brand-title { display: flex; align-items: center; gap: 0.75rem; }
     .brand-logo { width: 42px; height: 42px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 1.4rem; font-weight: 800; color: #fff; box-shadow: 0 0 20px rgba(56, 189, 248, 0.4); }
@@ -85,39 +88,32 @@ module.exports = async (req, res) => {
 
     .header-controls { display: flex; align-items: center; gap: 1rem; }
     .btn-refresh { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 1.2rem; border-radius: 10px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); }
-    .btn-refresh:hover { border-color: var(--accent-blue); color: var(--accent-blue); transform: translateY(-1px); }
+    .btn-refresh:hover { border-color: var(--accent-blue); color: var(--accent-blue); }
     .status-badge { display: flex; align-items: center; gap: 0.5rem; background: rgba(52, 211, 153, 0.1); border: 1px solid rgba(52, 211, 153, 0.2); color: var(--accent-green); padding: 0.5rem 1rem; border-radius: 9999px; font-size: 0.8rem; font-weight: 700; }
     .pulse-dot { width: 8px; height: 8px; background: var(--accent-green); border-radius: 50%; box-shadow: 0 0 10px var(--accent-green); animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.2); } 100% { opacity: 1; transform: scale(1); } }
+    @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.4; } 100% { opacity: 1; } }
 
-    /* Key Statistics Grid */
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
-    .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); position: relative; overflow: hidden; transition: all 0.3s ease; }
-    .stat-card:hover { border-color: rgba(56, 189, 248, 0.3); transform: translateY(-2px); }
+    .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
     .stat-label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
     .stat-value { font-size: 2rem; font-weight: 800; margin-top: 0.5rem; letter-spacing: -0.02em; }
-    .val-gems { color: var(--accent-blue); text-shadow: 0 0 20px rgba(56, 189, 248, 0.3); }
-    .val-trait { color: var(--accent-purple); text-shadow: 0 0 20px rgba(192, 132, 252, 0.3); }
+    .val-gems { color: var(--accent-blue); }
+    .val-trait { color: var(--accent-purple); }
 
-    /* Webhook Tester Console */
     .tester-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); margin-bottom: 2rem; }
-    .tester-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; color: var(--accent-blue); display: flex; align-items: center; gap: 0.5rem; }
+    .tester-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 1rem; color: var(--accent-blue); }
     .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
     .form-group { display: flex; flex-direction: column; gap: 0.4rem; }
     .form-group label { font-size: 0.8rem; color: var(--text-muted); font-weight: 600; }
-    .input-field, .select-field, .textarea-field { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 0.8rem; border-radius: 8px; font-size: 0.85rem; outline: none; transition: border-color 0.2s; }
-    .input-field:focus, .select-field:focus, .textarea-field:focus { border-color: var(--accent-blue); }
+    .input-field, .select-field, .textarea-field { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 0.8rem; border-radius: 8px; font-size: 0.85rem; outline: none; }
     .textarea-field { resize: vertical; min-height: 80px; font-family: monospace; }
-    .btn-send { background: linear-gradient(135deg, var(--accent-blue), #0284c7); color: #fff; border: none; padding: 0.75rem 1.5rem; border-radius: 10px; font-weight: 700; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; }
-    .btn-send:hover { opacity: 0.9; transform: translateY(-1px); }
-    .log-box { background: rgba(8, 12, 20, 0.9); border: 1px solid var(--card-border); border-radius: 8px; padding: 0.8rem; margin-top: 1rem; font-family: monospace; font-size: 0.8rem; color: var(--accent-green); display: none; }
+    .btn-send { background: linear-gradient(135deg, var(--accent-blue), #0284c7); color: #fff; border: none; padding: 0.75rem 1.5rem; border-radius: 10px; font-weight: 700; font-size: 0.85rem; cursor: pointer; }
+    .log-box { background: rgba(8, 12, 20, 0.9); border: 1px solid var(--card-border); border-radius: 8px; padding: 0.8rem; margin-top: 1rem; font-family: monospace; font-size: 0.8rem; display: none; }
 
-    /* Visual Charts Section */
     .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.25rem; margin-bottom: 2rem; }
     .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
     .chart-title { font-size: 1rem; font-weight: 700; color: var(--text-main); margin-bottom: 1.25rem; }
 
-    /* Interactive Data Table */
     .table-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); overflow: hidden; }
     .table-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 1rem; }
     .search-input { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text-main); padding: 0.6rem 1rem; border-radius: 10px; font-size: 0.85rem; outline: none; width: 250px; }
@@ -135,7 +131,6 @@ module.exports = async (req, res) => {
 <body>
   <div class="container">
     
-    <!-- Navigation Header -->
     <div class="nav-header">
       <div class="brand-title">
         <div class="brand-logo">R</div>
@@ -152,7 +147,6 @@ module.exports = async (req, res) => {
       </div>
     </div>
 
-    <!-- Key Metrics Cards -->
     <div class="stats-grid">
       <div class="stat-card">
         <div class="stat-label">Akun Terhubung</div>
@@ -172,7 +166,6 @@ module.exports = async (req, res) => {
       </div>
     </div>
 
-    <!-- Webhook Tester Console Section -->
     <div class="tester-card">
       <div class="tester-title">🧪 Live Webhook Tester Console</div>
       <div class="form-grid">
@@ -201,7 +194,6 @@ Shadow Income I: x2</textarea>
       <div id="logBox" class="log-box"></div>
     </div>
 
-    <!-- Charts Section -->
     <div class="charts-grid">
       <div class="chart-card">
         <div class="chart-title">📊 Hasil Farming Per Akun</div>
@@ -213,7 +205,6 @@ Shadow Income I: x2</textarea>
       </div>
     </div>
 
-    <!-- Interactive Data Table -->
     <div class="table-card">
       <div class="table-header">
         <h3 style="font-size: 1.1rem; font-weight: 700;">📋 Rincian Performa Akun</h3>
@@ -256,7 +247,6 @@ Shadow Income I: x2</textarea>
   </div>
 
   <script>
-    // Auto-Refresh tiap 30 detik
     setTimeout(() => { window.location.reload(); }, 30000);
 
     function updatePresetPayload() {
@@ -277,29 +267,45 @@ Shadow Income I: x2</textarea>
     async function sendTestWebhook() {
       const user = document.getElementById('testUser').value || 'TestAccount_01';
       const type = document.getElementById('testType').value;
-      const content = document.getElementById('testContent').value;
+      const contentText = document.getElementById('testContent').value;
       const logBox = document.getElementById('logBox');
 
       logBox.style.display = 'block';
+      logBox.style.color = '#38bdf8';
       logBox.innerText = 'Mengirim payload simulasi...';
 
       const payload = {
         username: user,
         event_type: type === 'error' ? 'error' : 'normal',
-        content: content
+        embeds: [
+          {
+            title: type === 'unit' ? 'New Unit!' : 'Webhook Report',
+            description: "Username: ||" + user + "||\n" + contentText
+          }
+        ]
       };
 
       try {
-        const response = await fetch('/api/webhook', {
+        const targetUrl = window.location.origin + '/api/webhook';
+        const response = await fetch(targetUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload)
         });
 
         const data = await response.json();
-        logBox.innerText = '✅ Status ' + response.status + ' OK: ' + JSON.stringify(data) + '\nSilakan klik Refresh Data untuk melihat perubahan di dashboard.';
+
+        if (response.ok && data.success) {
+          logBox.style.color = '#34d399';
+          logBox.innerText = '✅ BERHASIL [HTTP ' + response.status + ']: ' + JSON.stringify(data) + '\nRefreshing dashboard dalam 1.5 detik...';
+          setTimeout(() => { window.location.reload(); }, 1500);
+        } else {
+          logBox.style.color = '#f43f5e';
+          logBox.innerText = '❌ GAGAL [HTTP ' + response.status + ']: ' + JSON.stringify(data);
+        }
       } catch (err) {
-        logBox.innerText = '❌ Error sending webhook: ' + err.message;
+        logBox.style.color = '#f43f5e';
+        logBox.innerText = '❌ ERROR REQUEST: ' + err.message;
       }
     }
 
@@ -312,7 +318,6 @@ Shadow Income I: x2</textarea>
       });
     }
 
-    // Chart Setup
     const rawData = ${JSON.stringify(accountsData)};
     const labels = rawData.map(d => d.user);
     const gemsData = rawData.map(d => d.totalGems);
