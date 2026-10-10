@@ -173,7 +173,21 @@ async function scanAndAccumulate(user, text) {
 function checkRareAlert(text) {
   if (!text) return false;
   const lower = text.toLowerCase();
-  return lower.includes('secret') || lower.includes('monarch') || lower.includes('mythic');
+
+  // Deteksi Rarity > 1/500qd (seperti 1/1qi, 1/1sx, 1/1sp, dst.)
+  const hasHigherUnitPrefix = /1\/\d+(\.\d+)?(qi|sx|sp|oc|no|dc)/i.test(lower);
+  if (hasHigherUnitPrefix) return true;
+
+  // Deteksi Rarity QD di atas 500 (misal: 1/501qd hingga 1/999qd)
+  const qdMatch = lower.match(/1\/(\d+(\.\d+)?)qd/i);
+  if (qdMatch) {
+    const qdVal = parseFloat(qdMatch[1]);
+    if (!isNaN(qdVal) && qdVal >= 500) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function parseDiscordEmbed(embed) {
@@ -299,7 +313,7 @@ module.exports = async (req, res) => {
 
         if (isPending) {
           await redisCmd('flushall');
-          await sendTelegramMessage(chatId, `dibatalkan\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
+          await sendTelegramMessage(chatId, `🚮 *DATABASE DIBERSIHKAN*\nSeluruh data akumulasi dan penyimpanan database telah dihapus total.`);
         } else {
           await sendTelegramMessage(chatId, `❌ *Sesi Konfirmasi Kadaluarsa*\nSilakan ketik /reset terlebih dahulu.`);
         }
