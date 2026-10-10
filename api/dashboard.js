@@ -126,6 +126,7 @@ module.exports = async (req, res) => {
     const offlineMinConfig = offlineMinRes.result || '20';
     const globalCommands = parseInt(cmdRes.result || 0, 10);
     const globalBytes = parseInt(bytesRes.result || 0, 10);
+
     const now = Date.now();
     const systemUptimeText = formatUptime(now - parseInt(startRes.result || now, 10));
 
@@ -280,8 +281,8 @@ module.exports = async (req, res) => {
         </div>
         <div class="up-metric-box">
           <div class="up-label">STORAGE</div>
-          <div class="up-val-row"><div class="up-val">${globalBytes} B</div><div class="up-sub">/ 238 MB</div></div>
-          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min((globalBytes/(238*1024*1024))*100, 100)}%;"></div></div>
+          <div class="up-val-row"><div class="up-val">${globalBytes} B</div><div class="up-sub">/ 256 MB</div></div>
+          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min((globalBytes/(256*1024*1024))*100, 100)}%;"></div></div>
         </div>
         <div class="up-metric-box">
           <div class="up-label">COST</div>
