@@ -44,7 +44,7 @@ function formatUptime(ms) {
 function cleanUidata(str) {
   if (!str) return '';
   return str
-    .replace(/[\*_~`#]/g, '')
+    .replace(/[\*_~`#\|]/g, '')
     .replace(/Completed!/gi, '')
     .replace(/Name:/gi, '')
     .replace(/Floor Reached/gi, '')
@@ -72,8 +72,6 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, redirect: '/api/login' });
     }
 
-    // RESET DB: HANYA MEMBERSIHKAN STATISTIK AKUN USER
-    // COMMANDS DANK BANDWIDTH (global:total_commands & global:total_bytes) TIDAK DIRESET!
     if (req.method === 'POST' && body.action === 'reset') {
       const usersRes = await redisCmd('smembers', 'stats:users');
       const users = usersRes.result || [];
@@ -103,7 +101,7 @@ module.exports = async (req, res) => {
 
       return res.status(200).json({ 
         success: true, 
-        message: 'Seluruh statistik akun berhasil dibersihkan! (Data Commands & Bandwidth tetap dipertahankan)' 
+        message: 'Seluruh statistik akun berhasil dibersihkan!' 
       });
     }
 
@@ -178,12 +176,18 @@ module.exports = async (req, res) => {
 
       const potionsObj = {};
       if (Array.isArray(potionsRaw.result)) {
-        for (let i = 0; i < potionsRaw.result.length; i += 2) potionsObj[cleanUidata(potionsRaw.result[i])] = potionsRaw.result[i + 1];
+        for (let i = 0; i < potionsRaw.result.length; i += 2) {
+          const k = cleanUidata(potionsRaw.result[i]);
+          if (k) potionsObj[k] = potionsRaw.result[i + 1];
+        }
       } else if (typeof potionsRaw.result === 'object' && potionsRaw.result !== null) {
         Object.keys(potionsRaw.result).forEach(k => {
-          potionsObj[cleanUidata(k)] = potionsRaw.result[k];
+          const cleanK = cleanUidata(k);
+          if (cleanK) potionsObj[cleanK] = potionsRaw.result[k];
         });
       }
+
+      const sortedItemKeys = Object.keys(potionsObj).sort((a, b) => a.localeCompare(b));
 
       const duration = Math.max((now - parseInt(start.result || now, 10)) / 3600000, 0.01);
       const isOnline = (now - parseInt(last.result || 0, 10)) < (parseInt(offlineMinConfig, 10) * 60000);
@@ -192,7 +196,7 @@ module.exports = async (req, res) => {
         user, isOnline, totalLaporan: parseInt(laporan.result || 0, 10),
         unitMasukTas: parseInt(unitTas.result || 0, 10), towerSelesai: parseInt(tower.result || 0, 10),
         totalGems, totalTrait, gemsPerHour: Math.round(totalGems / duration),
-        traitPerHour: Math.round(totalTrait / duration), unitsReceived, towerList, potionsObj
+        traitPerHour: Math.round(totalTrait / duration), unitsReceived, towerList, potionsObj, sortedItemKeys
       };
     }));
 
@@ -335,7 +339,6 @@ module.exports = async (req, res) => {
 
         <div class="cards-wrapper" id="cardsContainer">
           ${accountsData.length > 0 ? accountsData.map(acc => {
-            const itemKeys = Object.keys(acc.potionsObj);
             return `
               <div class="acc-card" data-user="${acc.user.toLowerCase()}">
                 <div class="acc-header">
@@ -360,8 +363,8 @@ module.exports = async (req, res) => {
                   <div class="list-content">${acc.towerList.length > 0 ? acc.towerList.map(t => `<div>🏆 ${t}</div>`).join('') : '<div style="color: var(--text-muted);">Belum ada tower/floor selesai</div>'}</div>
                 </div>
                 <div class="list-box">
-                  <div class="list-title">Item & Potions</div>
-                  <div class="list-content">${itemKeys.length > 0 ? itemKeys.map(k => `<div>• ${k}: x${acc.potionsObj[k]}</div>`).join('') : '<div style="color: var(--text-muted);">Belum ada item</div>'}</div>
+                  <div class="list-title">Item & Potions (${acc.sortedItemKeys.length})</div>
+                  <div class="list-content">${acc.sortedItemKeys.length > 0 ? acc.sortedItemKeys.map(k => `<div>• ${k}: x${acc.potionsObj[k]}</div>`).join('') : '<div style="color: var(--text-muted);">Belum ada item</div>'}</div>
                 </div>
               </div>
             `;
