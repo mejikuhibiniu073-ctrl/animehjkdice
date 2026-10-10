@@ -18,7 +18,7 @@ async function redisCmd(command, ...args) {
   }
 }
 
-// FUNGSI NOTIFIKASI TELEGRAM DENGAN LOGGING ERROR
+// KIRIM NOTIFIKASI TELEGRAM DENGAN BOT TOKEN & CHAT ID
 async function sendTelegramAlert(message) {
   if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) return;
   try {
@@ -43,14 +43,16 @@ function cleanUsername(raw) {
   return match ? match[1] : cleaned;
 }
 
-// FUNGSI PEMBERSIH TEXT (SCAN 1)
-function sanitizeText(str) {
+// PEMBERSIH FORMAT DISCORD & TEKS BUG
+function cleanText(str) {
   if (!str) return '';
   return str
-    .replace(/[\*_~`]/g, '') // Hapus markdown Discord (**bold**, *italic*, dll)
-    .replace(/Completed!\s*/gi, '') // Hapus kata "Completed!"
-    .replace(/Name:\s*/gi, '') // Hapus kata "Name:"
-    .replace(/\s+/g, ' ') // Rapikan spasi berlebih
+    .replace(/[\*_~`]/g, '')
+    .replace(/Completed!/gi, '')
+    .replace(/Name:/gi, '')
+    .replace(/Floor Reached/gi, '')
+    .replace(/\[.*?\]\(.*?\)/g, '')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
@@ -77,24 +79,21 @@ module.exports = async (req, res) => {
       const payloadStr = JSON.stringify(body);
       const byteLength = Buffer.byteLength(payloadStr, 'utf8');
 
-      // Update Tracker Global
+      // Update Tracker Global Persisten
       await redisCmd('incr', 'global:total_commands');
       await redisCmd('incrby', 'global:total_bytes', byteLength);
 
-      // --- SCAN 1: KUMPULKAN DAN BERSIHKAN SEMUA TEKS PAYLOAD ---
+      // Kumpulkan Teks Laporan
       const content = body.content || '';
       const embeds = body.embeds || [];
       
       let rawText = content + ' ';
       embeds.forEach(e => {
-        rawText += `${e.title || ''} ${e.description || ''} `;
+        rawText += `${e.title \vert{}\vert{} ''}${e.description || ''} `;
         if (e.fields && Array.isArray(e.fields)) {
-          e.fields.forEach(f => { rawText += `${f.name || ''} ${f.value || ''} `; });
+          e.fields.forEach(f => { rawText += `${f.name \vert{}\vert{} ''}${f.value || ''} `; });
         }
       });
-
-      // Teks yang sudah bersih dari Bintang Markdown & Teks Bug
-      const cleanText = sanitizeText(rawText);
 
       // Ekstrak Nama Akun
       let username = 'Player';
@@ -103,7 +102,7 @@ module.exports = async (req, res) => {
       } else if (embeds.length > 0 && embeds[0].author && embeds[0].author.name) {
         username = cleanUsername(embeds[0].author.name);
       } else {
-        const userMatch = cleanText.match(/(?:User|Player|Account|Nama)\s*[:=]?\s*([a-zA-Z0-9_]+)/i);
+        const userMatch = rawText.match(/(?:User|Player|Account|Nama)\s*[:=]?\s*([a-zA-Z0-9_]+)/i);
         if (userMatch) username = userMatch[1];
       }
 
@@ -122,30 +121,26 @@ module.exports = async (req, res) => {
 
       await redisCmd('incr', `${prefix}:totalLaporan`);
 
-      // --- SCAN 2: EKSTRAKSI DATA PERSISTEN & KIRIM NOTIFIKASI TELEGRAM ---
-
       // 1. Parse Gems
-      const gemsMatch = cleanText.match(/(?:Gems|Gem)\s*[:+=]?\s*x?([\d,.]+)/i);
+      const gemsMatch = rawText.match(/(?:Gems|Gem)\s*[:+=]?\s*x?([\d,.]+)/i);
       if (gemsMatch) {
         const amount = parseInt(gemsMatch[1].replace(/[,.]/g, ''), 10);
         if (!isNaN(amount)) await redisCmd('incrby', `${prefix}:totalGems`, amount);
       }
 
       // 2. Parse Trait Rerolls
-      const traitMatch = cleanText.match(/(?:Trait|Reroll|Trait Reroll)\s*[:+=]?\s*x?([\d,.]+)/i);
+      const traitMatch = rawText.match(/(?:Trait|Reroll|Trait Reroll)\s*[:+=]?\s*x?([\d,.]+)/i);
       if (traitMatch) {
         const amount = parseInt(traitMatch[1].replace(/[,.]/g, ''), 10);
         if (!isNaN(amount)) await redisCmd('incrby', `${prefix}:totalTraitReroll`, amount);
       }
 
-      // 3. Parse Unit Diterima & Kirim Alert Telegram
-      const unitMatch = cleanText.match(/(?:Got Unit|Received Unit|Dapat Unit|Unit)\s*[:=]?\s*([a-zA-Z0-9\s\-\(\)]+)/i);
+      // 3. Parse Unit Diterima & Send Telegram Alert
+      const unitMatch = rawText.match(/(?:Got Unit|Received Unit|Dapat Unit|Unit)\s*[:=]?\s*([^\n\r,]+)/i);
       if (unitMatch) {
-        const unitName = sanitizeText(unitMatch[1]);
+        const unitName = cleanText(unitMatch[1]);
         if (unitName) {
           await redisCmd('rpush', `${prefix}:unitsReceived`, unitName);
-
-          // Selalu kirim notifikasi ke Telegram saat unit diterima (atau saring unit langka)
           await sendTelegramAlert(
             `🎲 <b>LAPORAN UNIT DITERIMA!</b>\n\n` +
             `👤 Akun: <b>${username}</b>\n` +
@@ -154,15 +149,14 @@ module.exports = async (req, res) => {
         }
       }
 
-      // 4. Parse Tower / Floor (Memperbaiki bug tampilan pada gambar)
-      const towerMatch = cleanText.match(/(?:Tower|Floor|Lantai)\s*[:=]?\s*([a-zA-Z0-9\s\-]+)/i);
+      // 4. Parse Tower / Floor (Murni Nama Tower)
+      const towerMatch = rawText.match(/(?:Tower|Floor|Lantai)\s*[:=]?\s*([^\n\r,\*]+)/i);
       if (towerMatch) {
-        const towerName = sanitizeText(towerMatch[1]);
+        const towerName = cleanText(towerMatch[1]);
         if (towerName) {
           await redisCmd('rpush', `${prefix}:towerList`, towerName);
           await redisCmd('incr', `${prefix}:towerSelesai`);
 
-          // Notifikasi Telegram untuk Tower
           await sendTelegramAlert(
             `🏆 <b>TOWER / FLOOR SELESAI!</b>\n\n` +
             `👤 Akun: <b>${username}</b>\n` +
@@ -172,9 +166,9 @@ module.exports = async (req, res) => {
       }
 
       // 5. Parse Item & Potions
-      const potionMatches = cleanText.matchAll(/(?:Potion|Item|Boost)\s*([a-zA-Z0-9\s]+)\s*x?([\d]+)/gi);
+      const potionMatches = rawText.matchAll(/(?:Potion|Item|Boost)\s*([a-zA-Z0-9\s]+)\s*x?([\d]+)/gi);
       for (const match of potionMatches) {
-        const pName = sanitizeText(match[1]);
+        const pName = cleanText(match[1]);
         const pQty = parseInt(match[2], 10);
         if (pName && !isNaN(pQty)) {
           await redisCmd('hincrby', `${prefix}:potions`, pName, pQty);
