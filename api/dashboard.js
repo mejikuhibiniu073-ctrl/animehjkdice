@@ -61,7 +61,6 @@ module.exports = async (req, res) => {
       return res.status(200).json({ success: true, redirect: '/api/login' });
     }
 
-    // RESET DB: Hapus data statistik & reset tracker persisten ke 0
     if (req.method === 'POST' && body.action === 'reset') {
       const usersRes = await redisCmd('smembers', 'stats:users');
       const users = usersRes.result || [];
@@ -115,7 +114,6 @@ module.exports = async (req, res) => {
     const currentRole = cookies.auth_role || 'user';
     const isAdmin = currentRole === 'admin' || currentUser === CONFIG.DASHBOARD_USER;
 
-    // AMBIL DATA PERSISTEN REAL-TIME LANGSUNG DARI KEY REDIS
     const [sysStatusRes, offlineMinRes, cmdRes, bytesRes, startRes, usersRes] = await Promise.all([
       redisCmd('get', 'system:analytics_status'),
       redisCmd('get', 'system:offline_threshold_min'),
@@ -128,7 +126,6 @@ module.exports = async (req, res) => {
     const isAnalyticsOn = sysStatusRes.result !== 'disabled';
     const offlineMinConfig = offlineMinRes.result || '20';
 
-    // Nilai presisi dari transaksi webhook
     const globalCommands = parseInt(cmdRes.result || 0, 10);
     const globalBytes = parseInt(bytesRes.result || 0, 10);
 
