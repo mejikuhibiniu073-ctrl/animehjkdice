@@ -3,7 +3,8 @@ const CONFIG = {
   CHAT_ID: '1315912406',
   TELEGRAM_BASE_URL: 'https://api.telegram.org/bot',
   REDIS_URL: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
-  REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN
+  REDIS_TOKEN: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
+  VERCEL_URL: process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://animehjkdice.vercel.app'
 };
 
 const TTL_5_HOURS = 18000;
@@ -137,6 +138,28 @@ function parseDiscordEmbed(embed) {
   return parts.join('\n\n');
 }
 
+function generateSmartInsights(gemsPerHour, traitPerHour, totalLaporan, unitCount) {
+  const insights = [];
+  
+  if (gemsPerHour > 300) {
+    insights.push('🔥 Performa farming Gems sangat tinggi (di atas target optimal).');
+  } else if (gemsPerHour < 100) {
+    insights.push('⚠️ Performa Gems tergolong rendah. Disarankan periksa buff atau peta Tower.');
+  } else {
+    insights.push('✅ Kecepatan farming Gems stabil.');
+  }
+
+  if (traitPerHour > 100) {
+    insights.push('⚡ Trait Reroll terkumpul sangat cepat.');
+  }
+
+  if (unitCount > 0) {
+    insights.push(`🎉 Berhasil mendapatkan ${unitCount} unit baru selama sesi ini.`);
+  }
+
+  return insights.join('\n    • ');
+}
+
 async function sendTelegramMessage(chatId, text) {
   const url = `${CONFIG.TELEGRAM_BASE_URL}${CONFIG.BOT_TOKEN}/sendMessage`;
   try {
@@ -183,14 +206,24 @@ module.exports = async (req, res) => {
       const chatId = payload.message.chat.id;
       const userText = (payload.message.text || '').trim();
 
-      // Perintah /vel menggantikan /start
       if (userText === '/vel') {
         const welcomeText = `Selamat datang di Roblox Webhook Monitoring Bot!\n\n` +
           `Berikut adalah daftar perintah yang tersedia:\n` +
-          `• /stats - Menampilkan akumulasi statistik dan estimasi rate per jam\n` +
+          `• /stats - Menampilkan akumulasi statistik, estimasi rate, dan AI Insights\n` +
+          `• /dashboard - Membuka halaman grafik visualisasi web\n` +
           `• /reset - Mengosongkan seluruh data penyimpanan database`;
 
         await sendTelegramMessage(chatId, welcomeText);
+        return res.status(200).json({ success: true });
+      }
+
+      if (userText === '/dashboard') {
+        const dashboardUrl = `${CONFIG.VERCEL_URL}/api/dashboard`;
+        const dashMsg = `📊 *WEB DASHBOARD ANALYTICS*\n\n` +
+          `Klik tautan di bawah untuk melihat grafik statistik real-time:\n` +
+          `${dashboardUrl}`;
+
+        await sendTelegramMessage(chatId, dashMsg);
         return res.status(200).json({ success: true });
       }
 
@@ -274,6 +307,8 @@ module.exports = async (req, res) => {
               .join('\n');
           }
 
+          const smartInsights = generateSmartInsights(gemsPerHour, traitPerHour, totalLaporan, unitsReceived.length);
+
           reportText += `👤 *Akun: ${user}*\n` +
             `  • Total Laporan Diproses: *${totalLaporan}*\n` +
             `  • Unit Masuk Tas: *${unitMasukTas}*\n` +
@@ -283,6 +318,8 @@ module.exports = async (req, res) => {
             `  📈 *Estimasi Rate / Jam:*\n` +
             `    • ~${gemsPerHour} Gems/Jam\n` +
             `    • ~${traitPerHour} Trait/Jam\n` +
+            `  💡 *Smart Insights:*\n` +
+            `    • ${smartInsights}\n` +
             `  *Daftar Unit Diterima:*\n${unitList}\n` +
             `  *Item / Potion Diterima:*\n${itemList}\n────────────────\n`;
         }
