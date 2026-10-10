@@ -22,10 +22,13 @@ async function redisCmd(command, ...args) {
 
 function parseCookies(req) {
   const list = {};
-  req.headers.cookie?.split(';').forEach(cookie => {
-    const parts = cookie.split('=');
-    list[parts.shift().trim()] = decodeURI(parts.join('='));
-  });
+  const rc = req.headers.cookie;
+  if (rc) {
+    rc.split(';').forEach(cookie => {
+      const parts = cookie.split('=');
+      list[parts.shift().trim()] = decodeURI(parts.join('='));
+    });
+  }
   return list;
 }
 
@@ -39,237 +42,192 @@ function formatUptime(ms) {
 }
 
 module.exports = async (req, res) => {
-  const cookies = parseCookies(req);
+  try {
+    const cookies = parseCookies(req);
 
-  // Proteksi Akses Server-Side: Redirect ke /api/login jika belum terautentikasi
-  if (cookies.auth !== 'true') {
-    res.writeHead(302, { Location: '/api/login' });
-    return res.end();
-  }
-
-  // Handle Logout
-  if (req.method === 'POST' && req.body?.action === 'logout') {
-    res.setHeader('Set-Cookie', [
-      'auth=; Path=/; HttpOnly; Max-Age=0',
-      'auth_user=; Path=/; HttpOnly; Max-Age=0',
-      'auth_role=; Path=/; HttpOnly; Max-Age=0'
-    ]);
-    return res.status(200).json({ success: true, redirect: '/api/login' });
-  }
-
-  // Handle Reset Database Statistik Akun (Metrik Global Upstash Tetap Aman)
-  if (req.method === 'POST' && req.body?.action === 'reset') {
-    const users = (await redisCmd('smembers', 'stats:users')).result || [];
-    if (Array.isArray(users)) {
-      await Promise.all(users.map(async (u) => {
-        const keys = [
-          `stats:${u}:totalLaporan`, `stats:${u}:unitMasukTas`, `stats:${u}:towerSelesai`,
-          `stats:${u}:totalGems`, `stats:${u}:totalTraitReroll`, `stats:${u}:startTime`,
-          `stats:${u}:lastSeen`, `stats:${u}:unitsReceived`, `stats:${u}:towerList`, `stats:${u}:potions`
-        ];
-        await Promise.all(keys.map(k => redisCmd('del', k)));
-      }));
+    if (cookies.auth !== 'true') {
+      res.writeHead(302, { Location: '/api/login' });
+      return res.end();
     }
-    await redisCmd('del', 'stats:users');
-    return res.status(200).json({ success: true, message: 'Statistik akun berhasil dibersihkan.' });
-  }
 
-  // Handle Hapus Akun Spesifik
-  if (req.method === 'POST' && req.body?.action === 'deleteKey' && req.body?.key) {
-    await redisCmd('del', req.body.key);
-    if (req.body.key.startsWith('stats:')) {
-      const uName = req.body.key.replace('stats:', '').split(':')[0];
-      await redisCmd('srem', 'stats:users', uName);
+    const body = req.body || {};
+
+    if (req.method === 'POST' && body.action === 'logout') {
+      res.setHeader('Set-Cookie', [
+        'auth=; Path=/; HttpOnly; Max-Age=0',
+        'auth_user=; Path=/; HttpOnly; Max-Age=0',
+        'auth_role=; Path=/; HttpOnly; Max-Age=0'
+      ]);
+      return res.status(200).json({ success: true, redirect: '/api/login' });
     }
-    return res.status(200).json({ success: true });
-  }
 
-  // Handle Pengaturan Threshold Offline
-  if (req.method === 'POST' && req.body?.action === 'setOfflineThreshold' && req.body?.offlineMin) {
-    await redisCmd('set', 'system:offline_threshold_min', req.body.offlineMin);
-    return res.status(200).json({ success: true });
-  }
-
-  // Identitas Pengguna Terhubung
-  const currentUser = decodeURIComponent(cookies.auth_user || 'Admin');
-  const currentRole = cookies.auth_role || 'user';
-  const isAdmin = currentRole === 'admin' || currentUser === CONFIG.DASHBOARD_USER;
-
-  // Fetch Data Redis Utama
-  const [sysStatusRes, offlineMinRes, cmdRes, bytesRes, startRes, usersRes] = await Promise.all([
-    redisCmd('get', 'system:analytics_status'),
-    redisCmd('get', 'system:offline_threshold_min'),
-    redisCmd('get', 'global:total_commands'),
-    redisCmd('get', 'global:total_bytes'),
-    redisCmd('get', 'global:system_start_time'),
-    redisCmd('smembers', 'stats:users')
-  ]);
-
-  const isAnalyticsOn = sysStatusRes.result !== 'disabled';
-  const offlineMinConfig = offlineMinRes.result || '20';
-  const globalCommands = parseInt(cmdRes.result || 0, 10);
-  const globalBytes = parseInt(bytesRes.result || 0, 10);
-  const now = Date.now();
-  const systemUptimeText = formatUptime(now - parseInt(startRes.result || now, 10));
-
-  let users = usersRes.result || [];
-  if (!Array.isArray(users)) users = users ? [users] : [];
-  const realTimeMs = usersRes.latencyMs;
-
-  let totalGemsGlobal = 0;
-  let totalTraitGlobal = 0;
-  let totalUnitsGlobal = 0;
-
-  const accountsData = await Promise.all(users.map(async (user) => {
-    const prefix = `stats:${user}`;
-    const [laporan, unitTas, tower, gems, trait, start, last, units, towers, potionsRaw] = await Promise.all([
-      redisCmd('get', `${prefix}:totalLaporan`),
-      redisCmd('get', `${prefix}:unitMasukTas`),
-      redisCmd('get', `${prefix}:towerSelesai`),
-      redisCmd('get', `${prefix}:totalGems`),
-      redisCmd('get', `${prefix}:totalTraitReroll`),
-      redisCmd('get', `${prefix}:startTime`),
-      redisCmd('get', `${prefix}:lastSeen`),
-      redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1),
-      redisCmd('lrange', `${prefix}:towerList`, 0, -1),
-      redisCmd('hgetall', `${prefix}:potions`)
-    ]);
-
-    const totalGems = parseInt(gems.result || 0, 10);
-    const totalTrait = parseInt(trait.result || 0, 10);
-    const unitsReceived = Array.isArray(units.result) ? units.result : (units.result ? [units.result] : []);
-    const towerList = Array.isArray(towers.result) ? towers.result : (towers.result ? [towers.result] : []);
-
-    totalGemsGlobal += totalGems;
-    totalTraitGlobal += totalTrait;
-    totalUnitsGlobal += unitsReceived.length;
-
-    const potionsObj = {};
-    if (Array.isArray(potionsRaw.result)) {
-      for (let i = 0; i < potionsRaw.result.length; i += 2) {
-        potionsObj[potionsRaw.result[i]] = potionsRaw.result[i + 1];
+    if (req.method === 'POST' && body.action === 'reset') {
+      const usersRes = await redisCmd('smembers', 'stats:users');
+      const users = usersRes.result || [];
+      if (Array.isArray(users)) {
+        for (const u of users) {
+          const keys = [
+            `stats:${u}:totalLaporan`, `stats:${u}:unitMasukTas`, `stats:${u}:towerSelesai`,
+            `stats:${u}:totalGems`, `stats:${u}:totalTraitReroll`, `stats:${u}:startTime`,
+            `stats:${u}:lastSeen`, `stats:${u}:unitsReceived`, `stats:${u}:towerList`, `stats:${u}:potions`
+          ];
+          for (const k of keys) {
+            await redisCmd('del', k);
+          }
+        }
       }
-    } else if (typeof potionsRaw.result === 'object' && potionsRaw.result !== null) {
-      Object.assign(potionsObj, potionsRaw.result);
+      await redisCmd('del', 'stats:users');
+      return res.status(200).json({ success: true, message: 'Statistik akun berhasil dibersihkan.' });
     }
 
-    const duration = Math.max((now - parseInt(start.result || now, 10)) / 3600000, 0.01);
-    const isOnline = (now - parseInt(last.result || 0, 10)) < (parseInt(offlineMinConfig, 10) * 60000);
-
-    return {
-      user,
-      isOnline,
-      totalLaporan: parseInt(laporan.result || 0, 10),
-      unitMasukTas: parseInt(unitTas.result || 0, 10),
-      towerSelesai: parseInt(tower.result || 0, 10),
-      totalGems,
-      totalTrait,
-      gemsPerHour: Math.round(totalGems / duration),
-      traitPerHour: Math.round(totalTrait / duration),
-      unitsReceived,
-      towerList,
-      potionsObj
-    };
-  }));
-
-  // Fetch Data User Terdaftar (Khusus Admin)
-  let allRegisteredUsers = [];
-  if (isAdmin) {
-    const allUsersList = (await redisCmd('smembers', 'users:all')).result || [];
-    if (Array.isArray(allUsersList)) {
-      allRegisteredUsers = await Promise.all(allUsersList.map(async (u) => {
-        const raw = await redisCmd('get', `user:${u}`);
-        return raw ? JSON.parse(raw) : null;
-      }));
-      allRegisteredUsers = allRegisteredUsers.filter(Boolean);
+    if (req.method === 'POST' && body.action === 'deleteKey' && body.key) {
+      await redisCmd('del', body.key);
+      if (body.key.startsWith('stats:')) {
+        const uName = body.key.replace('stats:', '').split(':')[0];
+        await redisCmd('srem', 'stats:users', uName);
+      }
+      return res.status(200).json({ success: true });
     }
-  }
 
-  const hostHeader = req.headers.host || 'animehjkdice.vercel.app';
-  const protocol = req.headers['x-forwarded-proto'] || 'https';
-  const webhookUrl = `${protocol}://${hostHeader}/api/webhook`;
+    if (req.method === 'POST' && body.action === 'setOfflineThreshold' && body.offlineMin) {
+      await redisCmd('set', 'system:offline_threshold_min', body.offlineMin);
+      return res.status(200).json({ success: true });
+    }
 
-  res.setHeader('Content-Type', 'text/html');
-  return res.status(200).send(`
+    const currentUser = decodeURIComponent(cookies.auth_user || 'Admin');
+    const currentRole = cookies.auth_role || 'user';
+    const isAdmin = currentRole === 'admin' || currentUser === CONFIG.DASHBOARD_USER;
+
+    const [sysStatusRes, offlineMinRes, cmdRes, bytesRes, startRes, usersRes] = await Promise.all([
+      redisCmd('get', 'system:analytics_status'),
+      redisCmd('get', 'system:offline_threshold_min'),
+      redisCmd('get', 'global:total_commands'),
+      redisCmd('get', 'global:total_bytes'),
+      redisCmd('get', 'global:system_start_time'),
+      redisCmd('smembers', 'stats:users')
+    ]);
+
+    const isAnalyticsOn = sysStatusRes.result !== 'disabled';
+    const offlineMinConfig = offlineMinRes.result || '20';
+    const globalCommands = parseInt(cmdRes.result || 0, 10);
+    const globalBytes = parseInt(bytesRes.result || 0, 10);
+    const now = Date.now();
+    const systemUptimeText = formatUptime(now - parseInt(startRes.result || now, 10));
+
+    let users = usersRes.result || [];
+    if (!Array.isArray(users)) users = users ? [users] : [];
+    const realTimeMs = usersRes.latencyMs || 0;
+
+    let totalGemsGlobal = 0;
+    let totalTraitGlobal = 0;
+    let totalUnitsGlobal = 0;
+
+    const accountsData = await Promise.all(users.map(async (user) => {
+      const prefix = `stats:${user}`;
+      const [laporan, unitTas, tower, gems, trait, start, last, units, towers, potionsRaw] = await Promise.all([
+        redisCmd('get', `${prefix}:totalLaporan`),
+        redisCmd('get', `${prefix}:unitMasukTas`),
+        redisCmd('get', `${prefix}:towerSelesai`),
+        redisCmd('get', `${prefix}:totalGems`),
+        redisCmd('get', `${prefix}:totalTraitReroll`),
+        redisCmd('get', `${prefix}:startTime`),
+        redisCmd('get', `${prefix}:lastSeen`),
+        redisCmd('lrange', `${prefix}:unitsReceived`, 0, -1),
+        redisCmd('lrange', `${prefix}:towerList`, 0, -1),
+        redisCmd('hgetall', `${prefix}:potions`)
+      ]);
+
+      const totalGems = parseInt(gems.result || 0, 10);
+      const totalTrait = parseInt(trait.result || 0, 10);
+      const unitsReceived = Array.isArray(units.result) ? units.result : (units.result ? [units.result] : []);
+      const towerList = Array.isArray(towers.result) ? towers.result : (towers.result ? [towers.result] : []);
+
+      totalGemsGlobal += totalGems;
+      totalTraitGlobal += totalTrait;
+      totalUnitsGlobal += unitsReceived.length;
+
+      const potionsObj = {};
+      if (Array.isArray(potionsRaw.result)) {
+        for (let i = 0; i < potionsRaw.result.length; i += 2) {
+          potionsObj[potionsRaw.result[i]] = potionsRaw.result[i + 1];
+        }
+      } else if (typeof potionsRaw.result === 'object' && potionsRaw.result !== null) {
+        Object.assign(potionsObj, potionsRaw.result);
+      }
+
+      const duration = Math.max((now - parseInt(start.result || now, 10)) / 3600000, 0.01);
+      const isOnline = (now - parseInt(last.result || 0, 10)) < (parseInt(offlineMinConfig, 10) * 60000);
+
+      return {
+        user,
+        isOnline,
+        totalLaporan: parseInt(laporan.result || 0, 10),
+        unitMasukTas: parseInt(unitTas.result || 0, 10),
+        towerSelesai: parseInt(tower.result || 0, 10),
+        totalGems,
+        totalTrait,
+        gemsPerHour: Math.round(totalGems / duration),
+        traitPerHour: Math.round(totalTrait / duration),
+        unitsReceived,
+        towerList,
+        potionsObj
+      };
+    }));
+
+    let allRegisteredUsers = [];
+    if (isAdmin) {
+      const allUsersListRes = await redisCmd('smembers', 'users:all');
+      const allUsersList = allUsersListRes.result || [];
+      if (Array.isArray(allUsersList)) {
+        allRegisteredUsers = await Promise.all(allUsersList.map(async (u) => {
+          const raw = await redisCmd('get', `user:${u}`);
+          return raw.result ? JSON.parse(raw.result) : null;
+        }));
+        allRegisteredUsers = allRegisteredUsers.filter(Boolean);
+      }
+    }
+
+    const hostHeader = req.headers.host || 'animehjkdice.vercel.app';
+    const protocol = req.headers['x-forwarded-proto'] || 'https';
+    const webhookUrl = `${protocol}://${hostHeader}/api/webhook`;
+
+    res.setHeader('Content-Type', 'text/html');
+    return res.status(200).send(`
 <!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Analytics & Database Control Center</title>
+  <title>Analytics Control Center</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <style>
-    :root {
-      --bg: #07090e;
-      --card-bg: rgba(18, 26, 43, 0.75);
-      --card-border: rgba(255, 255, 255, 0.08);
-      --accent-cyan: #38bdf8;
-      --accent-purple: #c084fc;
-      --accent-green: #34d399;
-      --accent-red: #f43f5e;
-      --text: #f8fafc;
-      --text-muted: #94a3b8;
-    }
-
+    :root { --bg: #07090e; --card-bg: rgba(18, 26, 43, 0.75); --card-border: rgba(255, 255, 255, 0.08); --accent-cyan: #38bdf8; --accent-purple: #c084fc; --accent-green: #34d399; --accent-red: #f43f5e; --text: #f8fafc; --text-muted: #94a3b8; }
     * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Plus Jakarta Sans', sans-serif; }
     body { background: var(--bg); color: var(--text); min-height: 100vh; padding: 2rem 1.5rem; }
     .container { max-width: 1400px; margin: 0 auto; }
-
     header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; flex-wrap: wrap; gap: 1rem; }
     .title-group { display: flex; align-items: center; gap: 1rem; }
     .logo { width: 48px; height: 48px; background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple)); border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 1.6rem; font-weight: 800; box-shadow: 0 0 20px rgba(56, 189, 248, 0.3); }
     .title-group h1 { font-size: 1.6rem; font-weight: 800; }
     .title-group p { font-size: 0.85rem; color: var(--text-muted); }
-
     .header-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
     .btn { background: var(--card-bg); border: 1px solid var(--card-border); color: var(--text); padding: 0.6rem 1rem; border-radius: 10px; font-weight: 600; font-size: 0.85rem; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); display: inline-flex; align-items: center; gap: 0.4rem; }
     .btn:hover { border-color: var(--accent-cyan); color: var(--accent-cyan); }
     .btn-danger { border-color: rgba(244, 63, 94, 0.3); color: var(--accent-red); }
     .btn-danger:hover { background: rgba(244, 63, 94, 0.15); border-color: var(--accent-red); color: var(--accent-red); }
-
-    /* STYLE BADGE USERNAME POJOK KANAN ATAS */
-    .user-badge-admin {
-      color: #38bdf8;
-      font-weight: 800;
-      font-size: 0.95rem;
-      text-shadow: 0 0 10px rgba(56, 189, 248, 0.8), 0 0 20px rgba(56, 189, 248, 0.5);
-      padding: 0.5rem 1rem;
-      background: rgba(56, 189, 248, 0.12);
-      border-radius: 12px;
-      border: 1px solid rgba(56, 189, 248, 0.4);
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-    }
-    .user-badge-user {
-      color: #ffffff;
-      font-weight: 700;
-      font-size: 0.95rem;
-      padding: 0.5rem 1rem;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-    }
-
-    /* NAVIGASI TAB MODULAR */
+    .user-badge-admin { color: #38bdf8; font-weight: 800; font-size: 0.95rem; text-shadow: 0 0 10px rgba(56, 189, 248, 0.8), 0 0 20px rgba(56, 189, 248, 0.5); padding: 0.5rem 1rem; background: rgba(56, 189, 248, 0.12); border-radius: 12px; border: 1px solid rgba(56, 189, 248, 0.4); display: inline-flex; align-items: center; gap: 0.4rem; }
+    .user-badge-user { color: #ffffff; font-weight: 700; font-size: 0.95rem; padding: 0.5rem 1rem; background: rgba(255, 255, 255, 0.05); border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.1); display: inline-flex; align-items: center; gap: 0.4rem; }
     .nav-tabs { display: flex; gap: 1rem; margin-bottom: 1.5rem; border-bottom: 1px solid var(--card-border); padding-bottom: 0.75rem; }
     .nav-btn { background: none; border: none; color: var(--text-muted); font-size: 0.95rem; font-weight: 700; cursor: pointer; padding: 0.5rem 1rem; border-radius: 10px; transition: all 0.2s; }
     .nav-btn.active { color: var(--accent-cyan); background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.2); }
-
     .webhook-display-card { background: rgba(18, 26, 43, 0.9); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 1.5rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
     .wh-url-box { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; background: rgba(8, 12, 20, 0.8); border: 1px solid var(--card-border); padding: 0.5rem 1rem; border-radius: 10px; color: var(--accent-cyan); flex: 1; min-width: 280px; overflow-x: auto; white-space: nowrap; }
     .btn-copy { background: linear-gradient(135deg, var(--accent-cyan), #0284c7); color: #fff; border: none; padding: 0.6rem 1.2rem; border-radius: 10px; font-weight: 700; cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem; }
-    .btn-copy:hover { opacity: 0.9; }
-
     .settings-panel { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 2rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1.5rem; }
     .setting-item { display: flex; align-items: center; gap: 0.8rem; }
     .setting-label { font-size: 0.85rem; font-weight: 700; color: var(--text-muted); }
     .setting-select { background: rgba(18, 26, 43, 0.8); border: 1px solid var(--card-border); color: #fff; padding: 0.4rem 0.8rem; border-radius: 8px; font-size: 0.85rem; outline: none; }
-
     .toggle-container { display: flex; align-items: center; gap: 0.6rem; background: rgba(18, 26, 43, 0.9); padding: 0.4rem 0.8rem; border-radius: 12px; border: 1px solid var(--card-border); }
     .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
     .switch input { opacity: 0; width: 0; height: 0; }
@@ -277,7 +235,6 @@ module.exports = async (req, res) => {
     .slider:before { position: absolute; content: ""; height: 18px; width: 18px; left: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
     input:checked + .slider { background-color: var(--accent-green); }
     input:checked + .slider:before { transform: translateX(20px); }
-
     .upstash-metrics-panel { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.25rem; margin-bottom: 2rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; }
     .up-metric-box { background: rgba(18, 26, 43, 0.6); border: 1px solid var(--card-border); border-radius: 12px; padding: 1rem 1.25rem; }
     .up-label { font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.4rem; }
@@ -286,69 +243,52 @@ module.exports = async (req, res) => {
     .up-sub { font-size: 0.75rem; color: var(--text-muted); }
     .up-progress-bg { width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 999px; overflow: hidden; }
     .up-progress-fill { height: 100%; background: var(--accent-green); border-radius: 999px; }
-
     .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem; margin-bottom: 2rem; }
     .stat-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
     .stat-label { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
     .stat-val { font-size: 2rem; font-weight: 800; margin-top: 0.4rem; letter-spacing: -0.02em; }
     .c-cyan { color: var(--accent-cyan); }
     .c-purple { color: var(--accent-purple); }
-
     .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.25rem; margin-bottom: 2rem; }
     .chart-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); }
     .chart-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 1.25rem; display: flex; justify-content: space-between; align-items: center; }
-
     .accounts-section { margin-bottom: 2rem; }
     .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; gap: 1rem; }
     .search-bar { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); color: var(--text); padding: 0.6rem 1rem; border-radius: 10px; font-size: 0.85rem; outline: none; width: 260px; }
-
     .cards-wrapper { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 1.25rem; }
     .acc-card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(12px); position: relative; }
     .acc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--card-border); }
     .acc-user { font-size: 1.1rem; font-weight: 800; color: var(--accent-cyan); }
     .btn-delete-acc { background: none; border: none; color: var(--accent-red); cursor: pointer; font-size: 0.85rem; }
-
     .status-pill { font-size: 0.75rem; font-weight: 700; padding: 0.25rem 0.6rem; border-radius: 6px; }
     .st-online { background: rgba(52, 211, 153, 0.15); color: var(--accent-green); border: 1px solid rgba(52, 211, 153, 0.3); }
     .st-offline { background: rgba(244, 63, 94, 0.15); color: var(--accent-red); border: 1px solid rgba(244, 63, 94, 0.3); }
-
     .acc-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1rem; background: rgba(8, 12, 20, 0.5); padding: 0.8rem; border-radius: 10px; font-size: 0.85rem; }
     .metric-item span { color: var(--text-muted); font-size: 0.75rem; display: block; }
     .metric-item b { font-size: 0.95rem; font-weight: 700; }
-
     .list-box { margin-top: 0.75rem; }
     .list-title { font-size: 0.8rem; font-weight: 700; color: var(--text-muted); margin-bottom: 0.4rem; text-transform: uppercase; }
     .list-content { background: rgba(8, 12, 20, 0.7); border: 1px solid var(--card-border); border-radius: 8px; padding: 0.6rem 0.8rem; max-height: 120px; overflow-y: auto; font-size: 0.8rem; line-height: 1.5; }
-
-    /* TABEL MANAJEMEN USER ADMIN */
     .admin-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
     .admin-table th, .admin-table td { padding: 0.85rem 1rem; text-align: left; border-bottom: 1px solid var(--card-border); font-size: 0.85rem; }
     .admin-table th { color: var(--text-muted); font-weight: 700; background: rgba(8, 12, 20, 0.6); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; }
-    .btn-action { padding: 0.4rem 0.8rem; border-radius: 8px; font-weight: 700; font-size: 0.75rem; cursor: pointer; border: none; margin-right: 0.3rem; transition: opacity 0.2s; }
-    .btn-action:hover { opacity: 0.85; }
+    .btn-action { padding: 0.4rem 0.8rem; border-radius: 8px; font-weight: 700; font-size: 0.75rem; cursor: pointer; border: none; margin-right: 0.3rem; }
     .btn-acc { background: #34d399; color: #000; }
     .btn-rej { background: #f43f5e; color: #fff; }
     .btn-ban { background: #fbbf24; color: #000; }
-
-    @media (max-width: 900px) {
-      .charts-grid { grid-template-columns: 1fr; }
-      .cards-wrapper { grid-template-columns: 1fr; }
-    }
   </style>
 </head>
 <body>
   <div class="container">
-    
     <header>
       <div class="title-group">
         <div class="logo">🎲</div>
         <div>
           <h1>Analytics Control Center</h1>
-          <p>Real-Time Upstash Redis Database & User Management</p>
+          <p>Real-Time Upstash Redis Database Center</p>
         </div>
       </div>
       <div class="header-right">
-        <!-- USERNAME & ROLE DI POJOK KANAN ATAS -->
         <div class="${isAdmin ? 'user-badge-admin' : 'user-badge-user'}">
           👤 ${currentUser} ${isAdmin ? '[ADMIN]' : '[USER]'}
         </div>
@@ -357,21 +297,16 @@ module.exports = async (req, res) => {
       </div>
     </header>
 
-    <!-- TAB NAVIGASI -->
     <div class="nav-tabs">
       <button class="nav-btn active" id="btnTabAnalytics" onclick="switchTab('analytics')">📊 Analytics Dashboard</button>
       ${isAdmin ? '<button class="nav-btn" id="btnTabAdmin" onclick="switchTab(\'userAdmin\')">⚙️ Pengaturan & Manajemen User</button>' : ''}
     </div>
 
-    <!-- TAB 1: ANALYTICS DASHBOARD -->
     <div id="analyticsTab">
       <div class="webhook-display-card">
         <div style="font-weight: 700; font-size: 0.9rem; color: var(--text-muted);">WEBHOOK GATEWAY URL:</div>
         <div class="wh-url-box" id="whUrlValue">${webhookUrl}</div>
-        <button class="btn-copy" onclick="copyWebhookLink()">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-          Salin Webhook URL
-        </button>
+        <button class="btn-copy" onclick="copyWebhookLink()">Salin Webhook URL</button>
       </div>
 
       <div class="settings-panel">
@@ -384,12 +319,10 @@ module.exports = async (req, res) => {
             </label>
           </div>
         </div>
-
         <div class="setting-item">
           <span class="setting-label">LAMA ONLINE SYSTEM:</span>
           <span style="font-family: 'JetBrains Mono', monospace; font-weight: 800; color: var(--accent-green); background: rgba(52, 211, 153, 0.1); padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid rgba(52, 211, 153, 0.3);">${systemUptimeText}</span>
         </div>
-
         <div class="setting-item">
           <span class="setting-label">OFFLINE THRESHOLD:</span>
           <select class="setting-select" id="offlineSelect" ${isAdmin ? 'onchange="updateOfflineThreshold(this.value)"' : 'disabled'}>
@@ -399,91 +332,43 @@ module.exports = async (req, res) => {
             <option value="30" ${offlineMinConfig === '30' ? 'selected' : ''}>30 Menit</option>
           </select>
         </div>
-
-        <div class="setting-item">
-          <span class="setting-label">AUTO REFRESH:</span>
-          <select class="setting-select" id="refreshSelect" onchange="changeAutoRefresh(this.value)">
-            <option value="15000">15 Detik</option>
-            <option value="30000" selected>30 Detik</option>
-            <option value="60000">1 Menit</option>
-            <option value="0">OFF</option>
-          </select>
-        </div>
       </div>
 
       <div class="upstash-metrics-panel">
         <div class="up-metric-box">
           <div class="up-label">WEBHOOK LATENCY</div>
-          <div class="up-val-row">
-            <div class="up-val" style="color: var(--accent-green);">${realTimeMs} ms</div>
-            <div class="up-sub">Real-Time</div>
-          </div>
-          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min((realTimeMs/500)*100, 100)}%;"></div></div>
+          <div class="up-val-row"><div class="up-val" style="color: var(--accent-green);">${realTimeMs} ms</div></div>
         </div>
-
         <div class="up-metric-box">
           <div class="up-label">COMMANDS</div>
-          <div class="up-val-row">
-            <div class="up-val">${globalCommands > 1000 ? (globalCommands/1000).toFixed(1) + ' rb' : globalCommands}</div>
-            <div class="up-sub">/ 500k per month</div>
-          </div>
-          <div class="up-progress-bg"><div class="up-progress-fill" style="width: ${Math.min((globalCommands/500000)*100, 100)}%;"></div></div>
+          <div class="up-val-row"><div class="up-val">${globalCommands > 1000 ? (globalCommands/1000).toFixed(1) + ' rb' : globalCommands}</div></div>
         </div>
-
         <div class="up-metric-box">
           <div class="up-label">BANDWIDTH</div>
-          <div class="up-val-row">
-            <div class="up-val">${(globalBytes / 1024).toFixed(0)} KB</div>
-            <div class="up-sub">/ 10 GB</div>
-          </div>
-          <div class="up-progress-bg"><div class="up-progress-fill" style="width: 1%;"></div></div>
+          <div class="up-val-row"><div class="up-val">${(globalBytes / 1024).toFixed(0)} KB</div></div>
         </div>
-
         <div class="up-metric-box">
           <div class="up-label">STORAGE</div>
-          <div class="up-val-row">
-            <div class="up-val">${globalBytes} B</div>
-            <div class="up-sub">/ 238 MB</div>
-          </div>
-          <div class="up-progress-bg"><div class="up-progress-fill" style="width: 1%;"></div></div>
+          <div class="up-val-row"><div class="up-val">${globalBytes} B</div></div>
         </div>
-
         <div class="up-metric-box">
           <div class="up-label">COST</div>
-          <div class="up-val-row">
-            <div class="up-val">$0.00</div>
-          </div>
+          <div class="up-val-row"><div class="up-val">$0.00</div></div>
         </div>
       </div>
 
       <div class="stats-grid">
-        <div class="stat-card">
-          <div class="stat-label">Akun Aktif</div>
-          <div class="stat-val">${users.length}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Total Gems Database</div>
-          <div class="stat-val c-cyan">x${totalGemsGlobal.toLocaleString('id-ID')}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Total Trait Reroll</div>
-          <div class="stat-val c-purple">x${totalTraitGlobal.toLocaleString('id-ID')}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Total Unit Diterima</div>
-          <div class="stat-val">${totalUnitsGlobal}</div>
-        </div>
+        <div class="stat-card"><div class="stat-label">Akun Aktif</div><div class="stat-val">${users.length}</div></div>
+        <div class="stat-card"><div class="stat-label">Total Gems Database</div><div class="stat-val c-cyan">x${totalGemsGlobal.toLocaleString('id-ID')}</div></div>
+        <div class="stat-card"><div class="stat-label">Total Trait Reroll</div><div class="stat-val c-purple">x${totalTraitGlobal.toLocaleString('id-ID')}</div></div>
+        <div class="stat-card"><div class="stat-label">Total Unit Diterima</div><div class="stat-val">${totalUnitsGlobal}</div></div>
       </div>
 
       <div class="charts-grid">
         <div class="chart-card">
-          <div class="chart-title">
-            <span>⚡ Live Webhook Latency (ms)</span>
-            <span style="font-size: 0.8rem; color: var(--accent-green);" id="liveMsLabel">${realTimeMs} ms</span>
-          </div>
+          <div class="chart-title"><span>⚡ Live Webhook Latency (ms)</span><span style="font-size: 0.8rem; color: var(--accent-green);">${realTimeMs} ms</span></div>
           <canvas id="latencyChart" height="120"></canvas>
         </div>
-
         <div class="chart-card">
           <div class="chart-title">🎯 Distribusi Gems Per Akun</div>
           <canvas id="doughnutChart" height="220"></canvas>
@@ -504,86 +389,40 @@ module.exports = async (req, res) => {
                 <div class="acc-header">
                   <div class="acc-user">👤 ${acc.user}</div>
                   <div style="display: flex; align-items: center; gap: 0.5rem;">
-                    <div class="status-pill ${acc.isOnline ? 'st-online' : 'st-offline'}">
-                      ${acc.isOnline ? '● ONLINE' : '○ OFFLINE'}
-                    </div>
-                    ${isAdmin ? `<button class="btn-delete-acc" onclick="deleteAccountData('${acc.user}')" title="Hapus Data Akun Ini">🗑️</button>` : ''}
+                    <div class="status-pill ${acc.isOnline ? 'st-online' : 'st-offline'}">${acc.isOnline ? '● ONLINE' : '○ OFFLINE'}</div>
+                    ${isAdmin ? `<button class="btn-delete-acc" onclick="deleteAccountData('${acc.user}')">🗑️</button>` : ''}
                   </div>
                 </div>
-
                 <div class="acc-metrics">
-                  <div class="metric-item">
-                    <span>Total Gems</span>
-                    <b class="c-cyan">x${acc.totalGems.toLocaleString('id-ID')}</b>
-                  </div>
-                  <div class="metric-item">
-                    <span>Total Trait Reroll</span>
-                    <b class="c-purple">x${acc.totalTrait.toLocaleString('id-ID')}</b>
-                  </div>
-                  <div class="metric-item">
-                    <span>Rate Gems/Jam</span>
-                    <b>~${acc.gemsPerHour.toLocaleString('id-ID')}</b>
-                  </div>
-                  <div class="metric-item">
-                    <span>Rate Trait/Jam</span>
-                    <b>~${acc.traitPerHour.toLocaleString('id-ID')}</b>
-                  </div>
-                  <div class="metric-item">
-                    <span>Total Laporan</span>
-                    <b>${acc.totalLaporan} log</b>
-                  </div>
-                  <div class="metric-item">
-                    <span>Tower Selesai</span>
-                    <b>${acc.towerSelesai}</b>
-                  </div>
+                  <div class="metric-item"><span>Total Gems</span><b class="c-cyan">x${acc.totalGems.toLocaleString('id-ID')}</b></div>
+                  <div class="metric-item"><span>Total Trait Reroll</span><b class="c-purple">x${acc.totalTrait.toLocaleString('id-ID')}</b></div>
+                  <div class="metric-item"><span>Rate Gems/Jam</span><b>~${acc.gemsPerHour.toLocaleString('id-ID')}</b></div>
+                  <div class="metric-item"><span>Rate Trait/Jam</span><b>~${acc.traitPerHour.toLocaleString('id-ID')}</b></div>
                 </div>
-
                 <div class="list-box">
                   <div class="list-title">Units Diterima (${acc.unitsReceived.length})</div>
-                  <div class="list-content">
-                    ${acc.unitsReceived.length > 0 
-                      ? acc.unitsReceived.map(u => `<div>• ${u}</div>`).join('') 
-                      : '<div style="color: var(--text-muted);">Belum ada unit</div>'}
-                  </div>
+                  <div class="list-content">${acc.unitsReceived.length > 0 ? acc.unitsReceived.map(u => `<div>• ${u}</div>`).join('') : '<div style="color: var(--text-muted);">Belum ada unit</div>'}</div>
                 </div>
-
                 <div class="list-box">
                   <div class="list-title">Tower Selesai / Floor Dicapai (${acc.towerList.length})</div>
-                  <div class="list-content">
-                    ${acc.towerList.length > 0 
-                      ? acc.towerList.map(t => `<div>🏆 ${t}</div>`).join('') 
-                      : '<div style="color: var(--text-muted);">Belum ada tower/floor selesai</div>'}
-                  </div>
+                  <div class="list-content">${acc.towerList.length > 0 ? acc.towerList.map(t => `<div>🏆 ${t}</div>`).join('') : '<div style="color: var(--text-muted);">Belum ada tower/floor selesai</div>'}</div>
                 </div>
-
                 <div class="list-box">
                   <div class="list-title">Item & Potions</div>
-                  <div class="list-content">
-                    ${itemKeys.length > 0 
-                      ? itemKeys.map(k => `<div>• ${k}: x${acc.potionsObj[k]}</div>`).join('') 
-                      : '<div style="color: var(--text-muted);">Belum ada item</div>'}
-                  </div>
+                  <div class="list-content">${itemKeys.length > 0 ? itemKeys.map(k => `<div>• ${k}: x${acc.potionsObj[k]}</div>`).join('') : '<div style="color: var(--text-muted);">Belum ada item</div>'}</div>
                 </div>
-
               </div>
             `;
-          }).join('') : `
-            <div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 3rem; background: var(--card-bg); border-radius: 16px;">
-              Belum ada data laporan yang tersimpan di database.
-            </div>
-          `}
+          }).join('') : `<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 3rem;">Belum ada data laporan.</div>`}
         </div>
       </div>
     </div>
 
-    <!-- TAB 2: KHUSUS MANAJEMEN USER & PENGATURAN (ADMIN) -->
     ${isAdmin ? `
     <div id="userAdminTab" style="display:none;">
       <div class="acc-card" style="margin-bottom:1.5rem;">
-        <h3 style="margin-bottom:0.5rem; color:var(--accent-cyan);">🔑 Root Admin (Vercel Environment)</h3>
-        <p style="color:var(--text-muted); font-size:0.9rem;">
-          Pengguna utama: <b style="color:#fff;">${CONFIG.DASHBOARD_USER}</b> | Status: <b style="color:var(--accent-green);">Akses Penuh / Root Admin</b>
-        </p>
+        <h3 style="margin-bottom:0.5rem; color:var(--accent-cyan);">🔑 Root Admin</h3>
+        <p style="color:var(--text-muted); font-size:0.9rem;">Pengguna utama: <b style="color:#fff;">${CONFIG.DASHBOARD_USER}</b></p>
       </div>
 
       <div class="acc-card">
@@ -609,21 +448,15 @@ module.exports = async (req, res) => {
                   </select>
                 </td>
                 <td>
-                  <span class="status-pill ${u.status === 'approved' ? 'st-online' : 'st-offline'}">
-                    ${u.status.toUpperCase()}
-                  </span>
+                  <span class="status-pill ${u.status === 'approved' ? 'st-online' : 'st-offline'}">${u.status.toUpperCase()}</span>
                 </td>
-                <td style="font-family:'JetBrains Mono', monospace; color:var(--accent-cyan); font-weight:600;">
-                  ${u.deviceInfo || 'Belum Ada Data Login'}
-                </td>
+                <td style="font-family:'JetBrains Mono', monospace; color:var(--accent-cyan); font-weight:600;">${u.deviceInfo || 'Belum Ada Data Login'}</td>
                 <td>
                   ${u.status === 'pending' ? `
                     <button class="btn-action btn-acc" onclick="approveUser('${u.username}', true)">Setujui / ACC</button>
                     <button class="btn-action btn-rej" onclick="approveUser('${u.username}', false)">Tolak</button>
                   ` : `
-                    <button class="btn-action btn-ban" onclick="toggleBanUser('${u.username}')">
-                      ${u.status === 'banned' ? 'Aktifkan (Unban)' : 'Ban User'}
-                    </button>
+                    <button class="btn-action btn-ban" onclick="toggleBanUser('${u.username}')">${u.status === 'banned' ? 'Unban' : 'Ban User'}</button>
                   `}
                 </td>
               </tr>
@@ -637,16 +470,6 @@ module.exports = async (req, res) => {
   </div>
 
   <script>
-    let refreshTimer = setInterval(() => { window.location.reload(); }, 30000);
-
-    function changeAutoRefresh(val) {
-      clearInterval(refreshTimer);
-      const intervalMs = parseInt(val, 10);
-      if (intervalMs > 0) {
-        refreshTimer = setInterval(() => { window.location.reload(); }, intervalMs);
-      }
-    }
-
     function switchTab(tab) {
       document.getElementById('analyticsTab').style.display = tab === 'analytics' ? 'block' : 'none';
       if (document.getElementById('userAdminTab')) {
@@ -659,178 +482,94 @@ module.exports = async (req, res) => {
     }
 
     function copyWebhookLink() {
-      const urlText = document.getElementById('whUrlValue').innerText;
-      navigator.clipboard.writeText(urlText);
-      alert('✅ Webhook URL berhasil disalin!');
+      navigator.clipboard.writeText(document.getElementById('whUrlValue').innerText);
+      alert('✅ Webhook URL disalin!');
     }
 
     async function toggleSystemAnalytics(el) {
-      const isChecked = el.checked;
-      try {
-        const res = await fetch('/api/system', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: isChecked })
-        });
-        if (res.ok) {
-          alert(isChecked ? '🟢 System Analytics DIAKTIFKAN!' : '🔴 System Analytics DIMATIKAN TOTAL!');
-        } else {
-          el.checked = !isChecked;
-        }
-      } catch (e) {
-        el.checked = !isChecked;
-      }
+      await fetch('/api/system', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: el.checked }) });
     }
 
-    async function updateOfflineThreshold(minVal) {
-      await fetch('/api/dashboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'setOfflineThreshold', offlineMin: minVal })
-      });
-      alert('✅ Threshold Alert Offline diubah ke ' + minVal + ' menit.');
+    async function updateOfflineThreshold(v) {
+      await fetch('/api/dashboard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setOfflineThreshold', offlineMin: v }) });
+      alert('✅ Threshold diubah!');
     }
 
-    async function deleteAccountData(username) {
-      if (confirm('Hapus seluruh data khusus untuk akun ' + username + '?')) {
-        await fetch('/api/dashboard', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'deleteKey', key: 'stats:' + username })
-        });
-        window.location.reload();
+    async function deleteAccountData(u) {
+      if (confirm('Hapus ' + u + '?')) {
+        await fetch('/api/dashboard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'deleteKey', key: 'stats:' + u }) });
+        location.reload();
       }
     }
 
     async function logout() {
-      const res = await fetch('/api/dashboard', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'logout' })
-      });
+      const res = await fetch('/api/dashboard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) });
       const data = await res.json();
       if (data.redirect) window.location.href = data.redirect;
     }
 
     async function confirmReset() {
-      if (confirm('⚠️ PERINGATAN: Menghapus data akun di database? (Metrik COST, BANDWIDTH & COMMANDS tetap AMAN)')) {
-        const res = await fetch('/api/dashboard', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'reset' })
-        });
-        if (res.ok) {
-          alert('✅ Statistik akun dibersihkan.');
-          window.location.reload();
-        }
+      if (confirm('⚠️ Reset database statistik?')) {
+        await fetch('/api/dashboard', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reset' }) });
+        location.reload();
       }
     }
 
     function filterCards() {
       const q = document.getElementById('searchInput').value.toLowerCase();
-      const cards = document.querySelectorAll('.acc-card');
-      cards.forEach(card => {
+      document.querySelectorAll('.acc-card').forEach(card => {
         const u = card.getAttribute('data-user');
         if (u) card.style.display = u.includes(q) ? 'block' : 'none';
       });
     }
 
     async function approveUser(user, approve) {
-      const res = await fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'approveUser', targetUser: user, approve })
-      });
+      const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'approveUser', targetUser: user, approve }) });
       const data = await res.json();
       alert(data.message);
-      window.location.reload();
+      location.reload();
     }
 
     async function changeUserRole(user, newRole) {
-      const res = await fetch('/api/users', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'changeRole', targetUser: user, newRole })
-      });
+      const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'changeRole', targetUser: user, newRole }) });
       const data = await res.json();
       alert(data.message);
-      window.location.reload();
+      location.reload();
     }
 
     async function toggleBanUser(user) {
-      if (confirm('Ubah status banned/aktif untuk akun ' + user + '?')) {
-        const res = await fetch('/api/users', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'toggleBan', targetUser: user })
-        });
+      if (confirm('Ubah status ' + user + '?')) {
+        const res = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'toggleBan', targetUser: user }) });
         const data = await res.json();
         alert(data.message);
-        window.location.reload();
+        location.reload();
       }
     }
 
-    // CHART LATENCY MS REAL-TIME ANIMASI BERGERAK
     const currentMs = ${realTimeMs};
-    let latencyHistory = JSON.parse(localStorage.getItem('lat_hist') || '[]');
-    const nowTime = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    let history = JSON.parse(localStorage.getItem('lat_hist') || '[]');
+    history.push({ time: new Date().toLocaleTimeString('id-ID'), ms: currentMs });
+    if (history.length > 12) history.shift();
+    localStorage.setItem('lat_hist', JSON.stringify(history));
 
-    latencyHistory.push({ time: nowTime, ms: currentMs });
-    if (latencyHistory.length > 12) latencyHistory.shift();
-    localStorage.setItem('lat_hist', JSON.stringify(latencyHistory));
-
-    const latencyCtx = document.getElementById('latencyChart').getContext('2d');
-    new Chart(latencyCtx, {
+    new Chart(document.getElementById('latencyChart').getContext('2d'), {
       type: 'line',
-      data: {
-        labels: latencyHistory.map(h => h.time),
-        datasets: [{
-          label: 'Latency (ms)',
-          data: latencyHistory.map(h => h.ms),
-          borderColor: '#34d399',
-          backgroundColor: 'rgba(52, 211, 153, 0.15)',
-          fill: true,
-          tension: 0.4,
-          borderWidth: 2,
-          pointRadius: 4,
-          pointBackgroundColor: '#34d399'
-        }]
-      },
-      options: {
-        responsive: true,
-        animation: {
-          duration: 1000,
-          easing: 'easeOutQuart'
-        },
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#94a3b8' } },
-          y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#94a3b8' }, beginAtZero: true }
-        }
-      }
+      data: { labels: history.map(h => h.time), datasets: [{ data: history.map(h => h.ms), borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.15)', fill: true, tension: 0.4 }] },
+      options: { animation: { duration: 1000 }, plugins: { legend: { display: false } } }
     });
 
     const rawData = ${JSON.stringify(accountsData)};
-    const labels = rawData.map(d => d.user);
-    const gemsData = rawData.map(d => d.totalGems);
-
     new Chart(document.getElementById('doughnutChart').getContext('2d'), {
       type: 'doughnut',
-      data: {
-        labels: labels,
-        datasets: [{
-          data: gemsData,
-          backgroundColor: ['#38bdf8', '#c084fc', '#34d399', '#f43f5e', '#fbbf24'],
-          borderWidth: 0
-        }]
-      },
-      options: {
-        responsive: true,
-        plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } }
-      }
+      data: { labels: rawData.map(d => d.user), datasets: [{ data: rawData.map(d => d.totalGems), backgroundColor: ['#38bdf8','#c084fc','#34d399','#f43f5e','#fbbf24'] }] },
+      options: { plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8' } } } }
     });
   </script>
 </body>
 </html>
-  `);
+    `);
+  } catch (err) {
+    console.error('Server error:', err);
+    return res.status(500).send('Internal Server Error: ' + err.message);
+  }
 };
